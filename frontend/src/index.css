@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+/* Ensure Leaflet map container fills its parent boundary cleanly */
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  border-radius: 0.5rem;
+  z-index: 1; /* Prevents map tiles from covering header dropdown elements */
+}
