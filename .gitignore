@@ -1,0 +1,10 @@
+# Ignore all raw and fused datasets
+*.csv
+*.joblib
+*.xlsx
+
+# Ignore frontend and backend node modules
+node_modules/
+.env
+dist/
+.vite/

@@ -1,6 +1,9 @@
 import type { Tower, OptimizationDetails, SystemSummary } from "../types";
 
-const API_BASE_URL = "http://localhost:5000/api/v1";
+// Base URL of the Node.js API Gateway.
+// - Local development: proxied through the Vite dev server (/api -> localhost:5000)
+// - Production: set VITE_API_BASE_URL to the deployed backend, e.g. https://your-backend.vercel.app/api/v1
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 
 export const fetchTowers = async (): Promise<Tower[]> => {
   const response = await fetch(`${API_BASE_URL}/towers`);

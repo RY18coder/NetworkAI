@@ -3,12 +3,21 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const csv = require("csv-parser");
+const dotenv = require("dotenv");
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Enable Cross-Origin Resource Sharing for React Frontend
-app.use(cors());
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN
+      ? process.env.CORS_ORIGIN.split(",")
+      : true,
+  }),
+);
 app.use(express.json());
 
 // In-Memory Data Store loaded from Step 3 Colab output CSV
@@ -171,22 +180,27 @@ app.get("/api/v1/analytics/summary", (req, res) => {
 });
 
 // ------------------------------------------------------------------
-// 3. START SERVER
+// 3. START SERVER (local process) / EXPORT APP (serverless & tests)
 // ------------------------------------------------------------------
-loadOptimizationData()
-  .then((loadedRecords) => {
-    optimizationRecords = loadedRecords;
-    app.listen(PORT, () => {
-      console.log(`\n==================================================`);
-      console.log(
-        `🚀 Node.js Express Gateway running on http://localhost:${PORT}`,
-      );
-      console.log(
-        `📊 Serving ${optimizationRecords.length.toLocaleString()} records to React App.`,
-      );
-      console.log(`==================================================\n`);
-    });
-  })
-  .catch((err) => {
+const startServer = async () => {
+  optimizationRecords = await loadOptimizationData();
+
+  app.listen(PORT, () => {
+    console.log(`\n==================================================`);
+    console.log(
+      `🚀 Node.js Express Gateway running on http://localhost:${PORT}`,
+    );
+    console.log(
+      `📊 Serving ${optimizationRecords.length.toLocaleString()} records to React App.`,
+    );
+    console.log(`==================================================\n`);
+  });
+};
+
+if (require.main === module) {
+  startServer().catch((err) => {
     console.error("❌ Failed to start Node.js server:", err);
   });
+}
+
+module.exports = app;
