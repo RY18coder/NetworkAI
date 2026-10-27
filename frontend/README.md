@@ -46,6 +46,34 @@ npm run preview  # preview the production build
 npm run lint     # eslint
 ```
 
+## Deploying on Vercel
+
+The frontend and Express API can be deployed as two Vercel projects from the
+same GitHub repository:
+
+1. Import the repository at [vercel.com/new](https://vercel.com/new) and set
+   the project's **Root Directory** to `backend`. Deploy it as the API project.
+   The backend Vercel configuration includes the telemetry CSV and routes
+   `/api/v1/*` requests to Express.
+2. Import the same repository again as a second Vercel project and set its
+   **Root Directory** to `frontend`. Vercel should detect Vite; use
+   `npm run build` as the build command and `dist` as the output directory.
+3. In the frontend project's environment variables, set
+   `VITE_API_BASE_URL` to
+   `https://<your-backend-domain>/api/v1` (no trailing slash), then redeploy.
+   Vite embeds this value at build time.
+4. In the backend project's environment variables, set `CORS_ORIGIN` to the
+   exact frontend origin, such as `https://<your-frontend-domain>`. For
+   multiple allowed origins, separate them with commas and no spaces.
+5. Verify the backend at `/health` and `/api/v1/analytics/summary`, then open
+   the frontend deployment and confirm its telemetry loads.
+
+The frontend's default `/api/v1` URL is intended for local development through
+the Vite proxy. A separately deployed frontend must use the backend's full
+URL. Vercel Functions are suitable for this Express API; use a persistent
+Node.js host instead if you later need long-running background jobs or
+in-memory state shared reliably between requests.
+
 ## Design
 
-The UI follows the design system documented in the repository-root `DESIGN.md` (Vercel-style ink & canvas language): near-white canvas (`#fafafa`), near-black ink (`#171717`), Geist / Geist Mono typography, hairline borders, tight functional radii (6px) and pill CTAs.
+The UI uses a Vercel-style ink-and-canvas theme: near-white canvas (`#fafafa`), near-black ink (`#171717`), Geist / Geist Mono typography, hairline borders, tight functional radii, and pill CTAs.

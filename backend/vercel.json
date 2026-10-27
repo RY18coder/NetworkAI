@@ -4,6 +4,10 @@
     "api/index.js": {
       "runtime": "@vercel/node@5",
       "includeFiles": "optimization_results.csv"
+    },
+    "api/[...path].js": {
+      "runtime": "@vercel/node@5",
+      "includeFiles": "optimization_results.csv"
     }
   }
 }

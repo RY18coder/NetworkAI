@@ -40,15 +40,14 @@ import type {
 // ------------------------------------------------------------------
 // 2. DESIGN TOKENS & 3GPP EARTH HARDWARE PHYSICS CONSTANTS
 // ------------------------------------------------------------------
-const STATIC_POWER_P0 = parseFloat(
-  import.meta.env.VITE_DEFAULT_BASE_STATION_P0_WATTS || "250",
-) || 250;
-const DELTA_P = parseFloat(
-  import.meta.env.VITE_DEFAULT_BASE_STATION_DELTA_P || "4.2",
-) || 4.2;
-const PMAX = parseFloat(
-  import.meta.env.VITE_DEFAULT_BASE_STATION_PMAX_WATTS || "40",
-) || 40;
+const STATIC_POWER_P0 =
+  parseFloat(import.meta.env.VITE_DEFAULT_BASE_STATION_P0_WATTS || "250") ||
+  250;
+const DELTA_P =
+  parseFloat(import.meta.env.VITE_DEFAULT_BASE_STATION_DELTA_P || "4.2") || 4.2;
+const PMAX =
+  parseFloat(import.meta.env.VITE_DEFAULT_BASE_STATION_PMAX_WATTS || "40") ||
+  40;
 
 // Map Centering Utility
 function ChangeMapView({ center }: { center: [number, number] }) {
@@ -67,7 +66,8 @@ export default function App() {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("telecom_theme");
       if (saved === "dark" || saved === "light") return saved;
-      if (window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+      if (window.matchMedia("(prefers-color-scheme: dark)").matches)
+        return "dark";
     }
     return "light";
   });
@@ -136,7 +136,11 @@ export default function App() {
       const lon = parseFloat((baseLon + Math.cos(i * 0.7) * 0.08).toFixed(5));
       const load = parseFloat((14 + ((i * 17) % 76)).toFixed(1));
       const state: "Full Power" | "Micro-Sleep (ASM)" | "Deep Sleep" =
-        load < 20 ? "Deep Sleep" : load < 45 ? "Micro-Sleep (ASM)" : "Full Power";
+        load < 20
+          ? "Deep Sleep"
+          : load < 45
+            ? "Micro-Sleep (ASM)"
+            : "Full Power";
       const baselineW = STATIC_POWER_P0 + DELTA_P * PMAX;
       const optPower =
         state === "Deep Sleep"
@@ -161,27 +165,30 @@ export default function App() {
     });
   }, []);
 
-  const generateSimulatedSummary = useCallback((tList: Tower[]): SystemSummary => {
-    const total = tList.length;
-    const active = tList.filter((t) => t.current_prb_load > 15).length;
-    const avgLoad =
-      tList.reduce((s, t) => s + t.current_prb_load, 0) / (total || 1);
-    const totalBaseW = tList.reduce((s, t) => s + t.baseline_power_w, 0);
-    const totalOptW = tList.reduce((s, t) => s + t.optimized_power_w, 0);
-    const baseKwh = (totalBaseW * 1) / 1000;
-    const optKwh = (totalOptW * 1) / 1000;
-    const savedKwh = baseKwh - optKwh;
-    const savingPct = baseKwh > 0 ? (savedKwh / baseKwh) * 100 : 0;
-    return {
-      total_towers: total,
-      active_towers: active,
-      average_prb_load: parseFloat(avgLoad.toFixed(2)),
-      total_baseline_kwh: parseFloat(baseKwh.toFixed(2)),
-      total_optimized_kwh: parseFloat(optKwh.toFixed(2)),
-      total_energy_saved_kwh: parseFloat(savedKwh.toFixed(2)),
-      savings_percentage: parseFloat(savingPct.toFixed(2)),
-    };
-  }, []);
+  const generateSimulatedSummary = useCallback(
+    (tList: Tower[]): SystemSummary => {
+      const total = tList.length;
+      const active = tList.filter((t) => t.current_prb_load > 15).length;
+      const avgLoad =
+        tList.reduce((s, t) => s + t.current_prb_load, 0) / (total || 1);
+      const totalBaseW = tList.reduce((s, t) => s + t.baseline_power_w, 0);
+      const totalOptW = tList.reduce((s, t) => s + t.optimized_power_w, 0);
+      const baseKwh = (totalBaseW * 1) / 1000;
+      const optKwh = (totalOptW * 1) / 1000;
+      const savedKwh = baseKwh - optKwh;
+      const savingPct = baseKwh > 0 ? (savedKwh / baseKwh) * 100 : 0;
+      return {
+        total_towers: total,
+        active_towers: active,
+        average_prb_load: parseFloat(avgLoad.toFixed(2)),
+        total_baseline_kwh: parseFloat(baseKwh.toFixed(2)),
+        total_optimized_kwh: parseFloat(optKwh.toFixed(2)),
+        total_energy_saved_kwh: parseFloat(savedKwh.toFixed(2)),
+        savings_percentage: parseFloat(savingPct.toFixed(2)),
+      };
+    },
+    [],
+  );
 
   const addLog = useCallback(
     (
@@ -279,7 +286,9 @@ export default function App() {
             baseline_power_w: baseline,
             optimized_power_w: opt,
             energy_saved_w: parseFloat((baseline - opt).toFixed(1)),
-            recommended_state: tMatch ? tMatch.current_state : "Micro-Sleep (ASM)",
+            recommended_state: tMatch
+              ? tMatch.current_state
+              : "Micro-Sleep (ASM)",
             sla_violation_risk: false,
           };
         } else {
@@ -337,8 +346,10 @@ export default function App() {
           t.current_state === "Deep Sleep"
             ? STATIC_POWER_P0 * 0.2
             : t.current_state === "Micro-Sleep (ASM)"
-              ? STATIC_POWER_P0 * 0.6 + DELTA_P * (PMAX * (t.current_prb_load / 100.0))
-              : STATIC_POWER_P0 + DELTA_P * (PMAX * (t.current_prb_load / 100.0)),
+              ? STATIC_POWER_P0 * 0.6 +
+                DELTA_P * (PMAX * (t.current_prb_load / 100.0))
+              : STATIC_POWER_P0 +
+                DELTA_P * (PMAX * (t.current_prb_load / 100.0)),
         pa_temperature_c: parseFloat((42.0 + Math.random() * 12.0).toFixed(1)),
         manual_override: false,
       }));
@@ -396,9 +407,13 @@ export default function App() {
             t.current_state === "Deep Sleep"
               ? STATIC_POWER_P0 * 0.2
               : t.current_state === "Micro-Sleep (ASM)"
-                ? STATIC_POWER_P0 * 0.6 + DELTA_P * (PMAX * (t.current_prb_load / 100.0))
-                : STATIC_POWER_P0 + DELTA_P * (PMAX * (t.current_prb_load / 100.0)),
-          pa_temperature_c: parseFloat((42.0 + Math.random() * 12.0).toFixed(1)),
+                ? STATIC_POWER_P0 * 0.6 +
+                  DELTA_P * (PMAX * (t.current_prb_load / 100.0))
+                : STATIC_POWER_P0 +
+                  DELTA_P * (PMAX * (t.current_prb_load / 100.0)),
+          pa_temperature_c: parseFloat(
+            (42.0 + Math.random() * 12.0).toFixed(1),
+          ),
           manual_override: false,
         }));
 
@@ -542,7 +557,14 @@ export default function App() {
 
       setTimeSeriesData((prev) => [...prev.slice(-18), newPoint]);
     }
-  }, [autoPilot, selectedTowerId, selectedTowerOpt, staticPowerP0, towers, trafficMultiplier]);
+  }, [
+    autoPilot,
+    selectedTowerId,
+    selectedTowerOpt,
+    staticPowerP0,
+    towers,
+    trafficMultiplier,
+  ]);
 
   // Keep a ref to the latest tick so the interval never resets mid-flight
   const executeSystemTickRef = useRef(executeSystemTick);
@@ -639,7 +661,7 @@ export default function App() {
       {
         name: "Full Power",
         value: full,
-        color: theme === "dark" ? "#60a5fa" : "#171717",
+        color: theme === "dark" ? "#f92b0b" : "#f11313",
       },
       { name: "Micro-Sleep", value: micro, color: "#f5a623" },
       { name: "Deep Sleep", value: deep, color: "#50e3c2" },
@@ -653,9 +675,9 @@ export default function App() {
   const getMarkerColor = (state: string) => {
     switch (state) {
       case "Full Power":
-        return theme === "dark" ? "#60a5fa" : "#171717";
+        return theme === "dark" ? "#ff3c00" : "#ff0505";
       case "Micro-Sleep (ASM)":
-        return "#f5a623";
+        return "#eca025";
       case "Deep Sleep":
         return "#50e3c2";
       default:
@@ -696,7 +718,9 @@ export default function App() {
       <div className="flex items-center justify-center h-screen bg-canvas font-mono text-sm">
         <div className="flex flex-col items-center gap-3">
           <div className="w-9 h-9 border-4 border-hairline border-t-primary rounded-full animate-spin"></div>
-          <span className="text-body">Connecting to Real-Time Telecom Telemetry Engine...</span>
+          <span className="text-body">
+            Connecting to Real-Time Telecom Telemetry Engine...
+          </span>
         </div>
       </div>
     );
@@ -988,12 +1012,16 @@ export default function App() {
               {theme === "dark" ? (
                 <>
                   <span className="text-warning text-sm">☀️</span>
-                  <span className="font-sans text-[11px] font-semibold">Light</span>
+                  <span className="font-sans text-[11px] font-semibold">
+                    Light
+                  </span>
                 </>
               ) : (
                 <>
                   <span className="text-violet text-sm">🌙</span>
-                  <span className="font-sans text-[11px] font-semibold">Dark</span>
+                  <span className="font-sans text-[11px] font-semibold">
+                    Dark
+                  </span>
                 </>
               )}
             </button>
@@ -1313,7 +1341,9 @@ export default function App() {
                               <Line
                                 type="monotone"
                                 dataKey="actual_prb"
-                                stroke={theme === "dark" ? "#f4f4f5" : "#171717"}
+                                stroke={
+                                  theme === "dark" ? "#f4f4f5" : "#171717"
+                                }
                                 strokeWidth={2}
                                 dot={false}
                                 name="Actual PRB (%)"
@@ -1333,8 +1363,13 @@ export default function App() {
                       </div>
 
                       <div className="bg-link-soft border border-hairline p-3.5 rounded-md text-xs text-body leading-relaxed">
-                        💡 <strong className="text-ink">Action Rationale:</strong> Base station consumes {selectedTower.optimized_power_w}W (saving{" "}
-                        {selectedTower.baseline_power_w - selectedTower.optimized_power_w}W baseline power).
+                        💡{" "}
+                        <strong className="text-ink">Action Rationale:</strong>{" "}
+                        Base station consumes {selectedTower.optimized_power_w}W
+                        (saving{" "}
+                        {selectedTower.baseline_power_w -
+                          selectedTower.optimized_power_w}
+                        W baseline power).
                       </div>
                     </div>
                   ) : (
@@ -1377,7 +1412,10 @@ export default function App() {
                           stroke={chartTextStroke}
                           tick={{ fontSize: 10 }}
                         />
-                        <YAxis stroke={chartTextStroke} tick={{ fontSize: 10 }} />
+                        <YAxis
+                          stroke={chartTextStroke}
+                          tick={{ fontSize: 10 }}
+                        />
                         <Tooltip contentStyle={chartTooltipStyle} />
                         <Legend />
                         <Area
@@ -1535,7 +1573,9 @@ export default function App() {
                       max="400"
                       step="10"
                       value={staticPowerP0}
-                      onChange={(e) => setStaticPowerP0(parseInt(e.target.value))}
+                      onChange={(e) =>
+                        setStaticPowerP0(parseInt(e.target.value))
+                      }
                       className="w-full accent-ink"
                     />
                   </div>
@@ -1643,7 +1683,9 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 font-mono text-xs">
                 <div className="bg-canvas p-4 rounded-md border border-hairline">
                   <h3 className="font-bold text-ink mb-2">Macro Cell (3GPP)</h3>
-                  <p className="text-body">P0 (Static Idle): {STATIC_POWER_P0} W</p>
+                  <p className="text-body">
+                    P0 (Static Idle): {STATIC_POWER_P0} W
+                  </p>
                   <p className="text-body">Delta_p (Slope): {DELTA_P}</p>
                   <p className="text-body">Pmax (RF Output): {PMAX} W</p>
                   <p className="text-ink mt-2 font-bold">
@@ -1652,11 +1694,15 @@ export default function App() {
                 </div>
 
                 <div className="bg-canvas p-4 rounded-md border border-hairline">
-                  <h3 className="font-bold text-violet mb-2">Micro-Sleep (ASM) Mode</h3>
+                  <h3 className="font-bold text-violet mb-2">
+                    Micro-Sleep (ASM) Mode
+                  </h3>
                   <p className="text-body">Symbol gap amplifier gating</p>
                   <p className="text-body">Disables PA during zero traffic</p>
                   <p className="text-body">Transition Latency: 35 µs</p>
-                  <p className="text-ink mt-2 font-bold">Power Reduction: ~40%</p>
+                  <p className="text-ink mt-2 font-bold">
+                    Power Reduction: ~40%
+                  </p>
                 </div>
 
                 <div className="bg-canvas p-4 rounded-md border border-hairline">
@@ -1664,7 +1710,9 @@ export default function App() {
                   <p className="text-body">Deactivates secondary carriers</p>
                   <p className="text-body">BBU static power reduction</p>
                   <p className="text-body">Transition Latency: 15 ms</p>
-                  <p className="text-ink mt-2 font-bold">Power Reduction: ~80%</p>
+                  <p className="text-ink mt-2 font-bold">
+                    Power Reduction: ~80%
+                  </p>
                 </div>
               </div>
             </div>
