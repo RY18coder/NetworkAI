@@ -22,26 +22,73 @@ app.use(express.json());
 
 // In-Memory Data Store loaded from Step 3 Colab output CSV
 let optimizationRecords = [];
+let dataPromise = null;
 
 // ------------------------------------------------------------------
 // 1. DATA INGESTION: Load ML & EARTH Optimization Output on Startup
 // ------------------------------------------------------------------
-const RESULTS_CSV_PATH = path.join(__dirname, "optimization_results.csv");
+const candidatePaths = [
+  path.join(__dirname, "optimization_results.csv"),
+  path.join(process.cwd(), "backend", "optimization_results.csv"),
+  path.join(process.cwd(), "optimization_results.csv"),
+  path.join(__dirname, "..", "optimization_results.csv"),
+  path.join(__dirname, "..", "backend", "optimization_results.csv"),
+];
+
+function findResultsCsvPath() {
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function generateFallbackRecords() {
+  const records = [];
+  const baseLat = 28.6139;
+  const baseLon = 77.209;
+  const timestamp = new Date().toISOString().slice(0, 13) + ":00:00";
+  for (let i = 1; i <= 36; i++) {
+    const lat = parseFloat((baseLat + Math.sin(i * 0.7) * 0.09).toFixed(5));
+    const lon = parseFloat((baseLon + Math.cos(i * 0.7) * 0.09).toFixed(5));
+    const load = parseFloat((12 + ((i * 19) % 78)).toFixed(1));
+    const state =
+      load < 20 ? "Deep Sleep" : load < 50 ? "Micro-Sleep (ASM)" : "Full Power";
+    const baseW = 418.4;
+    const optW =
+      state === "Deep Sleep" ? 50.0 : state === "Micro-Sleep (ASM)" ? 180.0 : baseW;
+    records.push({
+      Square_ID: 1000 + i,
+      Hourly_Timestamp: timestamp,
+      PRB_Utilization: load,
+      Predicted_PRB: parseFloat((load * 0.94).toFixed(1)),
+      Tower_Lat: lat,
+      Tower_Lon: lon,
+      QoS_Allocated_PRB: parseFloat((load * 1.15).toFixed(1)),
+      Baseline_Power_W: baseW,
+      Optimized_Power_W: optW,
+      Energy_Saved_W: parseFloat((baseW - optW).toFixed(1)),
+      Recommended_State: state,
+      SLA_Violation: false,
+    });
+  }
+  return records;
+}
 
 function loadOptimizationData() {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    const csvPath = findResultsCsvPath();
     const results = [];
-    if (!fs.existsSync(RESULTS_CSV_PATH)) {
+
+    if (!csvPath) {
       console.warn(
-        `⚠️ Warning: Results file not found at ${RESULTS_CSV_PATH}. Make sure optimization_results.csv is placed in this folder.`,
+        "⚠️ Warning: optimization_results.csv not found in candidate paths. Generating 36 Delhi NCR fallback nodes.",
       );
-      return resolve([]);
+      return resolve(generateFallbackRecords());
     }
 
-    fs.createReadStream(RESULTS_CSV_PATH)
+    fs.createReadStream(csvPath)
       .pipe(csv())
       .on("data", (data) => {
-        // Parse CSV types into strict JavaScript formats
         results.push({
           Square_ID: parseInt(data.Square_ID, 10),
           Hourly_Timestamp: data.Hourly_Timestamp,
@@ -59,14 +106,42 @@ function loadOptimizationData() {
         });
       })
       .on("end", () => {
+        if (results.length === 0) {
+          console.warn("⚠️ Results CSV was empty, using fallback nodes.");
+          return resolve(generateFallbackRecords());
+        }
         console.log(
-          `✅ Loaded ${results.length.toLocaleString()} ML & EARTH optimization records into Node.js server.`,
+          `✅ Loaded ${results.length.toLocaleString()} ML & EARTH optimization records from ${csvPath}.`,
         );
         resolve(results);
       })
-      .on("error", (err) => reject(err));
+      .on("error", (err) => {
+        console.error("Error streaming CSV:", err);
+        resolve(generateFallbackRecords());
+      });
   });
 }
+
+function ensureDataLoaded() {
+  if (!dataPromise) {
+    dataPromise = loadOptimizationData().then((records) => {
+      optimizationRecords = records;
+      return records;
+    });
+  }
+  return dataPromise;
+}
+
+// Ensure data is ready on serverless cold-starts or direct requests
+app.use(async (req, res, next) => {
+  if (optimizationRecords.length === 0) {
+    await ensureDataLoaded();
+  }
+  next();
+});
+
+// Kick off background load immediately
+ensureDataLoaded();
 
 // ------------------------------------------------------------------
 // 2. REST API ENDPOINTS
@@ -194,7 +269,7 @@ app.get("/api/v1/analytics/summary", (req, res) => {
 // 3. START SERVER (local process) / EXPORT APP (serverless & tests)
 // ------------------------------------------------------------------
 const startServer = async () => {
-  optimizationRecords = await loadOptimizationData();
+  await ensureDataLoaded();
 
   app.listen(PORT, () => {
     console.log(`\n==================================================`);

@@ -60,6 +60,33 @@ function ChangeMapView({ center }: { center: [number, number] }) {
 }
 
 export default function App() {
+  // Theme Mode: "light" | "dark"
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("telecom_theme");
+      if (saved === "dark" || saved === "light") return saved;
+      if (window.matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+    }
+    return "light";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "dark") {
+      root.classList.add("dark");
+    } else {
+      root.classList.remove("dark");
+    }
+    localStorage.setItem("telecom_theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
+  // Standalone / Simulated Demo Mode
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+
   // Navigation & View Mode
   const [activeTab, setActiveTab] = useState<
     "telemetry" | "analytics" | "simulation" | "hardware" | "logs"
@@ -98,12 +125,159 @@ export default function App() {
     import.meta.env.VITE_OSM_TILE_URL ||
     "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 
+  const generateSimulatedTowers = useCallback((): Tower[] => {
+    const baseLat = 28.6139;
+    const baseLon = 77.209;
+    return Array.from({ length: 36 }).map((_, i) => {
+      const towerId = 1001 + i;
+      const lat = parseFloat((baseLat + Math.sin(i * 0.7) * 0.08).toFixed(5));
+      const lon = parseFloat((baseLon + Math.cos(i * 0.7) * 0.08).toFixed(5));
+      const load = parseFloat((14 + ((i * 17) % 76)).toFixed(1));
+      const state: "Full Power" | "Micro-Sleep (ASM)" | "Deep Sleep" =
+        load < 20 ? "Deep Sleep" : load < 45 ? "Micro-Sleep (ASM)" : "Full Power";
+      const baselineW = STATIC_POWER_P0 + DELTA_P * PMAX;
+      const optPower =
+        state === "Deep Sleep"
+          ? STATIC_POWER_P0 * 0.2
+          : state === "Micro-Sleep (ASM)"
+            ? STATIC_POWER_P0 * 0.6 + DELTA_P * (PMAX * (load / 100))
+            : STATIC_POWER_P0 + DELTA_P * (PMAX * (load / 100));
+
+      return {
+        tower_id: towerId,
+        grid_id: towerId,
+        latitude: lat,
+        longitude: lon,
+        current_prb_load: load,
+        current_state: state,
+        radio_type: i % 3 === 0 ? "5G NR (Massive MIMO)" : "4G LTE Advanced",
+        baseline_power_w: baselineW,
+        optimized_power_w: parseFloat(optPower.toFixed(1)),
+        pa_temperature_c: parseFloat((40 + Math.random() * 12).toFixed(1)),
+        manual_override: false,
+      };
+    });
+  }, []);
+
+  const generateSimulatedSummary = useCallback((tList: Tower[]): SystemSummary => {
+    const total = tList.length;
+    const active = tList.filter((t) => t.current_prb_load > 15).length;
+    const avgLoad =
+      tList.reduce((s, t) => s + t.current_prb_load, 0) / (total || 1);
+    const totalBaseW = tList.reduce((s, t) => s + t.baseline_power_w, 0);
+    const totalOptW = tList.reduce((s, t) => s + t.optimized_power_w, 0);
+    const baseKwh = (totalBaseW * 1) / 1000;
+    const optKwh = (totalOptW * 1) / 1000;
+    const savedKwh = baseKwh - optKwh;
+    const savingPct = baseKwh > 0 ? (savedKwh / baseKwh) * 100 : 0;
+    return {
+      total_towers: total,
+      active_towers: active,
+      average_prb_load: parseFloat(avgLoad.toFixed(2)),
+      total_baseline_kwh: parseFloat(baseKwh.toFixed(2)),
+      total_optimized_kwh: parseFloat(optKwh.toFixed(2)),
+      total_energy_saved_kwh: parseFloat(savedKwh.toFixed(2)),
+      savings_percentage: parseFloat(savingPct.toFixed(2)),
+    };
+  }, []);
+
+  const addLog = useCallback(
+    (
+      level: "INFO" | "WARN" | "ACTION" | "CRITICAL",
+      towerId: number,
+      message: string,
+    ) => {
+      const now = new Date();
+      const timeStr = now.toTimeString().split(" ")[0];
+      const newLog: SystemLog = {
+        id: Math.random().toString(36).substr(2, 9),
+        timestamp: timeStr,
+        level,
+        tower_id: towerId,
+        message,
+      };
+      setSystemLogs((prev) => [newLog, ...prev.slice(0, 49)]);
+    },
+    [],
+  );
+
+  const enableDemoMode = useCallback(() => {
+    setIsDemoMode(true);
+    setError(null);
+    const mockTowers = generateSimulatedTowers();
+    setTowers(mockTowers);
+    setSummary(generateSimulatedSummary(mockTowers));
+    if (mockTowers.length > 0) {
+      const firstId = mockTowers[0].tower_id;
+      setSelectedTowerId(firstId);
+      const mockOpt: OptimizationDetails = {
+        tower_id: firstId,
+        timestamp: new Date().toISOString(),
+        predicted_prb: parseFloat(
+          (mockTowers[0].current_prb_load * 0.95).toFixed(1),
+        ),
+        qos_allocated_prb: parseFloat(
+          (mockTowers[0].current_prb_load * 1.15).toFixed(1),
+        ),
+        baseline_power_w: mockTowers[0].baseline_power_w,
+        optimized_power_w: mockTowers[0].optimized_power_w,
+        energy_saved_w: parseFloat(
+          (
+            mockTowers[0].baseline_power_w - mockTowers[0].optimized_power_w
+          ).toFixed(1),
+        ),
+        recommended_state: mockTowers[0].current_state,
+        sla_violation_risk: false,
+      };
+      setSelectedTowerOpt(mockOpt);
+      const now = new Date();
+      const pts: TimeSeriesPoint[] = Array.from({ length: 12 }).map((_, i) => {
+        const t = new Date(now.getTime() - (12 - i) * 3000);
+        return {
+          time: `${t.getHours().toString().padStart(2, "0")}:${t.getMinutes().toString().padStart(2, "0")}:${t.getSeconds().toString().padStart(2, "0")}`,
+          actual_prb: Math.min(
+            100,
+            Math.max(5, mockOpt.predicted_prb + (Math.random() - 0.5) * 6),
+          ),
+          predicted_prb: mockOpt.predicted_prb,
+          baseline_w: mockOpt.baseline_power_w,
+          optimized_w: mockOpt.optimized_power_w,
+        };
+      });
+      setTimeSeriesData(pts);
+    }
+    addLog(
+      "INFO",
+      0,
+      "Simulated 3GPP telemetry engine started in standalone mode.",
+    );
+  }, [addLog, generateSimulatedSummary, generateSimulatedTowers]);
+
   const fetchTowerDetails = useCallback(
     async (towerId: number) => {
       try {
-        const details: OptimizationDetails = await fetchTowerOptimization(
-          towerId,
-        );
+        let details: OptimizationDetails;
+        if (isDemoMode) {
+          const tMatch = towers.find((t) => t.tower_id === towerId);
+          const prb = tMatch ? tMatch.current_prb_load : 35;
+          const baseline = tMatch
+            ? tMatch.baseline_power_w
+            : STATIC_POWER_P0 + DELTA_P * PMAX;
+          const opt = tMatch ? tMatch.optimized_power_w : STATIC_POWER_P0 * 0.6;
+          details = {
+            tower_id: towerId,
+            timestamp: new Date().toISOString(),
+            predicted_prb: parseFloat((prb * 0.95).toFixed(1)),
+            qos_allocated_prb: parseFloat((prb * 1.15).toFixed(1)),
+            baseline_power_w: baseline,
+            optimized_power_w: opt,
+            energy_saved_w: parseFloat((baseline - opt).toFixed(1)),
+            recommended_state: tMatch ? tMatch.current_state : "Micro-Sleep (ASM)",
+            sla_violation_risk: false,
+          };
+        } else {
+          details = await fetchTowerOptimization(towerId);
+        }
         setSelectedTowerOpt(details);
 
         const now = new Date();
@@ -127,27 +301,7 @@ export default function App() {
         console.error(err);
       }
     },
-    [],
-  );
-
-  const addLog = useCallback(
-    (
-      level: "INFO" | "WARN" | "ACTION" | "CRITICAL",
-      towerId: number,
-      message: string,
-    ) => {
-      const now = new Date();
-      const timeStr = now.toTimeString().split(" ")[0];
-      const newLog: SystemLog = {
-        id: Math.random().toString(36).substr(2, 9),
-        timestamp: timeStr,
-        level,
-        tower_id: towerId,
-        message,
-      };
-      setSystemLogs((prev) => [newLog, ...prev.slice(0, 49)]);
-    },
-    [],
+    [isDemoMode, towers],
   );
 
   // ------------------------------------------------------------------
@@ -417,11 +571,15 @@ export default function App() {
     ).length;
     const deep = towers.filter((t) => t.current_state === "Deep Sleep").length;
     return [
-      { name: "Full Power", value: full, color: "#171717" },
+      {
+        name: "Full Power",
+        value: full,
+        color: theme === "dark" ? "#60a5fa" : "#171717",
+      },
       { name: "Micro-Sleep", value: micro, color: "#f5a623" },
       { name: "Deep Sleep", value: deep, color: "#50e3c2" },
     ];
-  }, [towers]);
+  }, [towers, theme]);
 
   const selectedTower = useMemo(() => {
     return towers.find((t) => t.tower_id === selectedTowerId);
@@ -430,7 +588,7 @@ export default function App() {
   const getMarkerColor = (state: string) => {
     switch (state) {
       case "Full Power":
-        return "#171717";
+        return theme === "dark" ? "#60a5fa" : "#171717";
       case "Micro-Sleep (ASM)":
         return "#f5a623";
       case "Deep Sleep":
@@ -439,6 +597,23 @@ export default function App() {
         return "#0070f3";
     }
   };
+
+  const chartGridStroke = theme === "dark" ? "#27272a" : "#ebebeb";
+  const chartTextStroke = theme === "dark" ? "#a1a1aa" : "#8f8f8f";
+  const chartTooltipStyle = useMemo(
+    () => ({
+      backgroundColor: theme === "dark" ? "#121215" : "#ffffff",
+      borderColor: theme === "dark" ? "#27272a" : "#ebebeb",
+      borderRadius: "8px",
+      fontSize: "11px",
+      color: theme === "dark" ? "#f4f4f5" : "#171717",
+      boxShadow:
+        theme === "dark"
+          ? "0 8px 24px rgba(0, 0, 0, 0.6)"
+          : "0 4px 12px rgba(0, 0, 0, 0.08)",
+    }),
+    [theme],
+  );
 
   const getStateBadgeClass = (state: string) => {
     switch (state) {
@@ -455,7 +630,7 @@ export default function App() {
     return (
       <div className="flex items-center justify-center h-screen bg-canvas font-mono text-sm">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-9 h-9 border-4 border-hairline border-t-ink rounded-full animate-spin"></div>
+          <div className="w-9 h-9 border-4 border-hairline border-t-primary rounded-full animate-spin"></div>
           <span className="text-body">Connecting to Real-Time Telecom Telemetry Engine...</span>
         </div>
       </div>
@@ -465,14 +640,34 @@ export default function App() {
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-canvas text-ink p-6 font-sans">
-        <h2 className="text-2xl font-bold mb-2">Telemetry Gateway Unavailable</h2>
-        <p className="text-body mb-4 text-center max-w-md">{error}</p>
-        <button
-          onClick={loadInitialData}
-          className="px-5 py-2.5 bg-ink text-white rounded-sm hover:bg-ink/90 font-semibold text-sm transition-all"
-        >
-          Retry Gateway Connection
-        </button>
+        <div className="w-12 h-12 rounded-full bg-warning-soft text-warning-deep border border-warning/30 flex items-center justify-center text-xl mb-4 font-bold">
+          ⚡
+        </div>
+        <h2 className="text-xl font-bold mb-2">Telemetry Gateway Offline</h2>
+        <p className="text-body mb-6 text-center max-w-md text-xs leading-relaxed">
+          {error}
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <button
+            onClick={enableDemoMode}
+            className="px-5 py-2.5 bg-primary text-on-primary rounded-sm hover:opacity-90 font-semibold text-xs transition-all shadow-xs"
+          >
+            🚀 Launch Simulated Demo Mode
+          </button>
+          <button
+            onClick={loadInitialData}
+            className="px-4 py-2.5 bg-canvas-elevated border border-hairline text-ink hover:bg-hairline rounded-sm font-semibold text-xs transition-all"
+          >
+            🔄 Retry Gateway Connection
+          </button>
+          <button
+            onClick={toggleTheme}
+            className="px-3 py-2.5 bg-canvas border border-hairline text-ink hover:bg-hairline rounded-sm font-mono text-xs transition-all"
+            title="Toggle Light / Dark Mode"
+          >
+            {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+          </button>
+        </div>
       </div>
     );
   }
@@ -487,7 +682,7 @@ export default function App() {
           {/* Logo Branding */}
           <div className="p-5 border-b border-hairline">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-ink flex items-center justify-center text-white font-bold text-lg">
+              <div className="w-9 h-9 rounded-full bg-primary flex items-center justify-center text-on-primary font-bold text-lg">
                 ⚡
               </div>
               <div>
@@ -507,7 +702,7 @@ export default function App() {
               onClick={() => setActiveTab("telemetry")}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "telemetry"
-                  ? "bg-ink text-white"
+                  ? "bg-primary text-on-primary"
                   : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
@@ -518,7 +713,7 @@ export default function App() {
               onClick={() => setActiveTab("analytics")}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "analytics"
-                  ? "bg-ink text-white"
+                  ? "bg-primary text-on-primary"
                   : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
@@ -529,7 +724,7 @@ export default function App() {
               onClick={() => setActiveTab("simulation")}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "simulation"
-                  ? "bg-ink text-white"
+                  ? "bg-primary text-on-primary"
                   : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
@@ -540,7 +735,7 @@ export default function App() {
               onClick={() => setActiveTab("hardware")}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "hardware"
-                  ? "bg-ink text-white"
+                  ? "bg-primary text-on-primary"
                   : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
@@ -551,7 +746,7 @@ export default function App() {
               onClick={() => setActiveTab("logs")}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "logs"
-                  ? "bg-ink text-white"
+                  ? "bg-primary text-on-primary"
                   : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
@@ -592,6 +787,16 @@ export default function App() {
               }`}
             >
               {autoPilot ? "ACTIVE" : "OFF"}
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between bg-canvas p-2 rounded-sm border border-hairline">
+            <span className="text-body text-[11px]">Theme Mode:</span>
+            <button
+              onClick={toggleTheme}
+              className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-canvas-elevated border border-hairline text-ink hover:border-ink/40 transition-all flex items-center gap-1 cursor-pointer"
+            >
+              {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
             </button>
           </div>
 
@@ -667,9 +872,25 @@ export default function App() {
             </div>
           </div>
 
-          {/* Quick Bulk Action Buttons */}
+          {/* Quick Bulk Action Buttons & Dark Mode Toggle */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono text-mute uppercase mr-1">
+            {isDemoMode ? (
+              <button
+                onClick={loadInitialData}
+                className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-pill bg-violet-soft text-violet text-[10px] font-mono font-semibold border border-violet/30 hover:opacity-85 transition-all cursor-pointer mr-1"
+                title="Running simulated 3GPP telemetry. Click to reconnect to live gateway."
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-violet animate-pulse"></span>
+                Simulated Demo
+              </button>
+            ) : (
+              <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-pill bg-cyan-soft text-ink text-[10px] font-mono font-semibold border border-cyan/30 mr-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan"></span>
+                Live Gateway
+              </span>
+            )}
+
+            <span className="text-[10px] font-mono text-mute uppercase mr-1 hidden lg:inline">
               Bulk Override:
             </span>
             <button
@@ -689,6 +910,27 @@ export default function App() {
               className="px-2.5 py-1 bg-canvas-elevated text-ink border border-hairline rounded-sm text-[10px] font-mono font-bold transition-all"
             >
               🔥 Full Power
+            </button>
+
+            {/* Dark Mode Toggle Button */}
+            <button
+              id="theme-toggle-btn"
+              onClick={toggleTheme}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-canvas border border-hairline hover:border-ink/40 text-ink rounded-pill text-xs font-mono font-medium transition-all shadow-xs cursor-pointer ml-2"
+              title={`Switch to ${theme === "dark" ? "Light" : "Dark"} Mode`}
+              aria-label="Toggle Light / Dark Mode"
+            >
+              {theme === "dark" ? (
+                <>
+                  <span className="text-warning text-sm">☀️</span>
+                  <span className="font-sans text-[11px] font-semibold">Light</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-violet text-sm">🌙</span>
+                  <span className="font-sans text-[11px] font-semibold">Dark</span>
+                </>
+              )}
             </button>
           </div>
         </header>
@@ -712,7 +954,7 @@ export default function App() {
                         onClick={() => setViewMode("map")}
                         className={`px-3 py-1 rounded-sm font-medium transition-all ${
                           viewMode === "map"
-                            ? "bg-ink text-white"
+                            ? "bg-primary text-on-primary"
                             : "text-body hover:text-ink"
                         }`}
                       >
@@ -722,7 +964,7 @@ export default function App() {
                         onClick={() => setViewMode("table")}
                         className={`px-3 py-1 rounded-sm font-medium transition-all ${
                           viewMode === "table"
-                            ? "bg-ink text-white"
+                            ? "bg-primary text-on-primary"
                             : "text-body hover:text-ink"
                         }`}
                       >
@@ -784,7 +1026,9 @@ export default function App() {
                             pathOptions={{
                               color:
                                 selectedTowerId === tower.tower_id
-                                  ? "#171717"
+                                  ? theme === "dark"
+                                    ? "#f4f4f5"
+                                    : "#171717"
                                   : getMarkerColor(tower.current_state),
                               fillColor: getMarkerColor(tower.current_state),
                               fillOpacity: 0.85,
@@ -861,7 +1105,7 @@ export default function App() {
                                   setSelectedTowerId(t.tower_id);
                                   fetchTowerDetails(t.tower_id);
                                 }}
-                                className="px-2.5 py-1 bg-ink text-white rounded-sm text-[10px] font-sans font-semibold"
+                                className="px-2.5 py-1 bg-primary text-on-primary rounded-sm text-[10px] font-sans font-semibold cursor-pointer hover:opacity-90 transition-all"
                               >
                                 Inspect Node
                               </button>
@@ -988,30 +1232,23 @@ export default function App() {
                             <LineChart data={timeSeriesData}>
                               <CartesianGrid
                                 strokeDasharray="3 3"
-                                stroke="#ebebeb"
+                                stroke={chartGridStroke}
                               />
                               <XAxis
                                 dataKey="time"
-                                stroke="#8f8f8f"
+                                stroke={chartTextStroke}
                                 tick={{ fontSize: 9 }}
                               />
                               <YAxis
                                 domain={[0, 100]}
-                                stroke="#8f8f8f"
+                                stroke={chartTextStroke}
                                 tick={{ fontSize: 9 }}
                               />
-                              <Tooltip
-                                contentStyle={{
-                                  backgroundColor: "#ffffff",
-                                  borderColor: "#ebebeb",
-                                  fontSize: "11px",
-                                  color: "#171717",
-                                }}
-                              />
+                              <Tooltip contentStyle={chartTooltipStyle} />
                               <Line
                                 type="monotone"
                                 dataKey="actual_prb"
-                                stroke="#171717"
+                                stroke={theme === "dark" ? "#f4f4f5" : "#171717"}
                                 strokeWidth={2}
                                 dot={false}
                                 name="Actual PRB (%)"
@@ -1066,19 +1303,17 @@ export default function App() {
                   <div className="h-64 w-full">
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={timeSeriesData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#ebebeb" />
+                        <CartesianGrid
+                          strokeDasharray="3 3"
+                          stroke={chartGridStroke}
+                        />
                         <XAxis
                           dataKey="time"
-                          stroke="#8f8f8f"
+                          stroke={chartTextStroke}
                           tick={{ fontSize: 10 }}
                         />
-                        <YAxis stroke="#8f8f8f" tick={{ fontSize: 10 }} />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#ffffff",
-                            borderColor: "#ebebeb",
-                          }}
-                        />
+                        <YAxis stroke={chartTextStroke} tick={{ fontSize: 10 }} />
+                        <Tooltip contentStyle={chartTooltipStyle} />
                         <Legend />
                         <Area
                           type="monotone"
@@ -1124,12 +1359,7 @@ export default function App() {
                             <Cell key={`cell-${index}`} fill={entry.color} />
                           ))}
                         </Pie>
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#ffffff",
-                            borderColor: "#ebebeb",
-                          }}
-                        />
+                        <Tooltip contentStyle={chartTooltipStyle} />
                         <Legend />
                       </PieChart>
                     </ResponsiveContainer>
@@ -1151,19 +1381,17 @@ export default function App() {
                         power: t.optimized_power_w,
                       }))}
                     >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#ebebeb" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke={chartGridStroke}
+                      />
                       <XAxis
                         dataKey="id"
-                        stroke="#8f8f8f"
+                        stroke={chartTextStroke}
                         tick={{ fontSize: 10 }}
                       />
-                      <YAxis stroke="#8f8f8f" tick={{ fontSize: 10 }} />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "#ffffff",
-                          borderColor: "#ebebeb",
-                        }}
-                      />
+                      <YAxis stroke={chartTextStroke} tick={{ fontSize: 10 }} />
+                      <Tooltip contentStyle={chartTooltipStyle} />
                       <Bar
                         dataKey="power"
                         fill="#0070f3"

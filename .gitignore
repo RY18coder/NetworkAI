@@ -9,3 +9,10 @@ node_modules/
 .env
 dist/
 .vite/
+
+# IDE & Agent Configs
+.agents/
+.claude/
+.codestudio/
+.cortex/
+
