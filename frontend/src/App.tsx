@@ -53,9 +53,11 @@ const PMAX = parseFloat(
 // Map Centering Utility
 function ChangeMapView({ center }: { center: [number, number] }) {
   const map = useMap();
+  const lat = center[0];
+  const lng = center[1];
   useEffect(() => {
-    map.setView(center, map.getZoom());
-  }, [center, map]);
+    map.setView([lat, lng], map.getZoom());
+  }, [lat, lng, map]);
   return null;
 }
 
@@ -253,12 +255,17 @@ export default function App() {
     );
   }, [addLog, generateSimulatedSummary, generateSimulatedTowers]);
 
+  const towersRef = useRef<Tower[]>([]);
+  useEffect(() => {
+    towersRef.current = towers;
+  }, [towers]);
+
   const fetchTowerDetails = useCallback(
     async (towerId: number) => {
       try {
         let details: OptimizationDetails;
         if (isDemoMode) {
-          const tMatch = towers.find((t) => t.tower_id === towerId);
+          const tMatch = towersRef.current.find((t) => t.tower_id === towerId);
           const prb = tMatch ? tMatch.current_prb_load : 35;
           const baseline = tMatch
             ? tMatch.baseline_power_w
@@ -301,7 +308,7 @@ export default function App() {
         console.error(err);
       }
     },
-    [isDemoMode, towers],
+    [isDemoMode],
   );
 
   // ------------------------------------------------------------------
@@ -342,7 +349,7 @@ export default function App() {
       if (towersList.length > 0) {
         const firstId = towersList[0].tower_id;
         setSelectedTowerId(firstId);
-        fetchTowerDetails(firstId);
+        void fetchTowerDetails(firstId);
       }
 
       addLog(
@@ -362,15 +369,73 @@ export default function App() {
     }
   }, [addLog, fetchTowerDetails]);
 
+  // Initial data load on mount with cancellation guard
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadInitialData();
-    }, 0);
+    let ignore = false;
+
+    const init = async () => {
+      try {
+        const [towersData, summaryData] = await Promise.all([
+          fetchTowers(),
+          fetchSystemSummary(),
+        ]);
+
+        if (ignore) return;
+
+        const towersList: Tower[] = towersData.map((t) => ({
+          tower_id: t.tower_id,
+          grid_id: t.grid_id,
+          latitude: t.latitude,
+          longitude: t.longitude,
+          current_prb_load: t.current_prb_load,
+          current_state: t.current_state,
+          radio_type:
+            t.tower_id % 3 === 0 ? "5G NR (Massive MIMO)" : "4G LTE Advanced",
+          baseline_power_w: STATIC_POWER_P0 + DELTA_P * PMAX,
+          optimized_power_w:
+            t.current_state === "Deep Sleep"
+              ? STATIC_POWER_P0 * 0.2
+              : t.current_state === "Micro-Sleep (ASM)"
+                ? STATIC_POWER_P0 * 0.6 + DELTA_P * (PMAX * (t.current_prb_load / 100.0))
+                : STATIC_POWER_P0 + DELTA_P * (PMAX * (t.current_prb_load / 100.0)),
+          pa_temperature_c: parseFloat((42.0 + Math.random() * 12.0).toFixed(1)),
+          manual_override: false,
+        }));
+
+        setTowers(towersList);
+        setSummary(summaryData);
+
+        if (towersList.length > 0) {
+          const firstId = towersList[0].tower_id;
+          setSelectedTowerId(firstId);
+          void fetchTowerDetails(firstId);
+        }
+
+        addLog(
+          "INFO",
+          0,
+          "Initial Node.js Gateway connection established. Telemetry initialized.",
+        );
+      } catch (err: unknown) {
+        if (ignore) return;
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Connection lost to Node.js server on http://localhost:5000";
+        setError(message);
+      } finally {
+        if (!ignore) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void init();
 
     return () => {
-      window.clearTimeout(timer);
+      ignore = true;
     };
-  }, [loadInitialData]);
+  }, [addLog, fetchTowerDetails]);
 
   const executeSystemTick = useCallback(() => {
     setTickCount((prev) => prev + 1);

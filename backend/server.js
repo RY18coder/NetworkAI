@@ -271,7 +271,7 @@ app.get("/api/v1/analytics/summary", (req, res) => {
 const startServer = async () => {
   await ensureDataLoaded();
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`\n==================================================`);
     console.log(
       `🚀 Node.js Express Gateway running on http://localhost:${PORT}`,
@@ -280,6 +280,21 @@ const startServer = async () => {
       `📊 Serving ${optimizationRecords.length.toLocaleString()} records to React App.`,
     );
     console.log(`==================================================\n`);
+  });
+
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `\n❌ Port ${PORT} is already in use by another running Node process.`,
+      );
+      console.error(
+        `👉 Stop the existing process or set PORT in backend/.env to another port.\n`,
+      );
+      process.exit(1);
+    } else {
+      console.error("❌ Node server error:", err);
+      process.exit(1);
+    }
   });
 };
 
