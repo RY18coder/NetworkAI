@@ -1,13 +1,13 @@
 {
   "version": 2,
   "functions": {
-    "api/index.js": {
+    "backend/api/index.js": {
       "runtime": "@vercel/node",
-      "includeFiles": "optimization_results.csv"
+      "includeFiles": "backend/optimization_results.csv"
     },
-    "api/[...path].js": {
+    "backend/api/[...path].js": {
       "runtime": "@vercel/node",
-      "includeFiles": "optimization_results.csv"
+      "includeFiles": "backend/optimization_results.csv"
     }
   }
 }
