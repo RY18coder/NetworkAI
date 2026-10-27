@@ -2,11 +2,11 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "runtime": "@vercel/node@5",
+      "runtime": "@vercel/node",
       "includeFiles": "optimization_results.csv"
     },
     "api/[...path].js": {
-      "runtime": "@vercel/node@5",
+      "runtime": "@vercel/node",
       "includeFiles": "optimization_results.csv"
     }
   }
