@@ -104,6 +104,17 @@ app.get("/api/v1/towers", (req, res) => {
     longitude: row.Tower_Lon,
     current_prb_load: row.PRB_Utilization,
     current_state: row.Recommended_State,
+    radio_type:
+      row.Square_ID % 3 === 0 ? "5G NR (Massive MIMO)" : "4G LTE Advanced",
+    baseline_power_w: 418.4,
+    optimized_power_w:
+      row.Recommended_State === "Deep Sleep"
+        ? 50.0
+        : row.Recommended_State === "Micro-Sleep (ASM)"
+          ? 180.0
+          : 418.4,
+    pa_temperature_c: 42.0,
+    manual_override: false,
   }));
 
   res.json(towers);

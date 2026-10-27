@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      // Proxy API Gateway calls to the local Express backend during dev
+      // Proxy API calls to the local Express gateway during development
       "/api": {
         target: "http://localhost:5000",
         changeOrigin: true,

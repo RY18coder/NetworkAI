@@ -1,5 +1,6 @@
 # Ignore all raw and fused datasets
 *.csv
+!backend/optimization_results.csv
 *.joblib
 *.xlsx
 

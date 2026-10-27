@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MapContainer,
   TileLayer,
@@ -24,66 +24,31 @@ import {
   Cell,
 } from "recharts";
 import "leaflet/dist/leaflet.css";
-
-// ------------------------------------------------------------------
-// 1. PRODUCTION TYPES & SCHEMAS
-// ------------------------------------------------------------------
-interface Tower {
-  tower_id: number;
-  grid_id: number;
-  latitude: number;
-  longitude: number;
-  current_prb_load: number;
-  current_state: "Full Power" | "Micro-Sleep (ASM)" | "Deep Sleep";
-  radio_type: string;
-  baseline_power_w: number;
-  optimized_power_w: number;
-  pa_temperature_c: number;
-  manual_override: boolean;
-}
-
-interface OptimizationDetails {
-  tower_id: number;
-  timestamp: string;
-  predicted_prb: number;
-  qos_allocated_prb: number;
-  baseline_power_w: number;
-  optimized_power_w: number;
-  energy_saved_w: number;
-  recommended_state: "Full Power" | "Micro-Sleep (ASM)" | "Deep Sleep";
-  sla_violation_risk: boolean;
-}
-
-interface SystemSummary {
-  total_towers: number;
-  active_towers: number;
-  average_prb_load: number;
-  total_baseline_kwh: number;
-  total_optimized_kwh: number;
-  total_energy_saved_kwh: number;
-  savings_percentage: number;
-}
-
-interface TimeSeriesPoint {
-  time: string;
-  actual_prb: number;
-  predicted_prb: number;
-  baseline_w: number;
-  optimized_w: number;
-}
-
-interface SystemLog {
-  id: string;
-  timestamp: string;
-  level: "INFO" | "WARN" | "ACTION" | "CRITICAL";
-  tower_id: number;
-  message: string;
-}
-
-type TowerApiRecord = Pick<
+import {
+  fetchSystemSummary,
+  fetchTowers,
+  fetchTowerOptimization,
+} from "./services/api";
+import type {
+  OptimizationDetails,
+  SystemLog,
+  SystemSummary,
+  TimeSeriesPoint,
   Tower,
-  "tower_id" | "grid_id" | "latitude" | "longitude" | "current_prb_load" | "current_state"
->;
+} from "./types";
+
+// ------------------------------------------------------------------
+// 2. DESIGN TOKENS & 3GPP EARTH HARDWARE PHYSICS CONSTANTS
+// ------------------------------------------------------------------
+const STATIC_POWER_P0 = parseFloat(
+  import.meta.env.VITE_DEFAULT_BASE_STATION_P0_WATTS || "250",
+) || 250;
+const DELTA_P = parseFloat(
+  import.meta.env.VITE_DEFAULT_BASE_STATION_DELTA_P || "4.2",
+) || 4.2;
+const PMAX = parseFloat(
+  import.meta.env.VITE_DEFAULT_BASE_STATION_PMAX_WATTS || "40",
+) || 40;
 
 // Map Centering Utility
 function ChangeMapView({ center }: { center: [number, number] }) {
@@ -127,42 +92,43 @@ export default function App() {
   // Interactive What-If Simulation Parameters
   const [trafficMultiplier, setTrafficMultiplier] = useState<number>(1.0);
   const [safetyHeadroom, setSafetyHeadroom] = useState<number>(20);
-  const [staticPowerP0, setStaticPowerP0] = useState<number>(250);
+  const [staticPowerP0, setStaticPowerP0] = useState<number>(STATIC_POWER_P0);
 
-  const API_BASE_URL =
-    import.meta.env.VITE_API_BASE_URL || "/api/v1";
   const OSM_TILE_URL =
     import.meta.env.VITE_OSM_TILE_URL ||
     "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 
-  const fetchTowerDetails = useCallback(async (towerId: number) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/optimize/${towerId}`);
-      if (!res.ok) throw new Error(`Tower ${towerId} telemetry unavailable.`);
-      const details: OptimizationDetails = await res.json();
-      setSelectedTowerOpt(details);
+  const fetchTowerDetails = useCallback(
+    async (towerId: number) => {
+      try {
+        const details: OptimizationDetails = await fetchTowerOptimization(
+          towerId,
+        );
+        setSelectedTowerOpt(details);
 
-      const now = new Date();
-      const initialPoints: TimeSeriesPoint[] = Array.from({ length: 12 }).map(
-        (_, i) => {
-          const t = new Date(now.getTime() - (12 - i) * 3000);
-          return {
-            time: `${t.getHours().toString().padStart(2, "0")}:${t.getMinutes().toString().padStart(2, "0")}:${t.getSeconds().toString().padStart(2, "0")}`,
-            actual_prb: Math.min(
-              100,
-              Math.max(5, details.predicted_prb + (Math.random() - 0.5) * 6),
-            ),
-            predicted_prb: details.predicted_prb,
-            baseline_w: details.baseline_power_w,
-            optimized_w: details.optimized_power_w,
-          };
-        },
-      );
-      setTimeSeriesData(initialPoints);
-    } catch (err) {
-      console.error(err);
-    }
-  }, [API_BASE_URL]);
+        const now = new Date();
+        const initialPoints: TimeSeriesPoint[] = Array.from({ length: 12 }).map(
+          (_, i) => {
+            const t = new Date(now.getTime() - (12 - i) * 3000);
+            return {
+              time: `${t.getHours().toString().padStart(2, "0")}:${t.getMinutes().toString().padStart(2, "0")}:${t.getSeconds().toString().padStart(2, "0")}`,
+              actual_prb: Math.min(
+                100,
+                Math.max(5, details.predicted_prb + (Math.random() - 0.5) * 6),
+              ),
+              predicted_prb: details.predicted_prb,
+              baseline_w: details.baseline_power_w,
+              optimized_w: details.optimized_power_w,
+            };
+          },
+        );
+        setTimeSeriesData(initialPoints);
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [],
+  );
 
   const addLog = useCallback(
     (
@@ -191,19 +157,12 @@ export default function App() {
     try {
       setLoading(true);
       setError(null);
-      const [towersRes, summaryRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/towers`),
-        fetch(`${API_BASE_URL}/analytics/summary`),
+      const [towersData, summaryData] = await Promise.all([
+        fetchTowers(),
+        fetchSystemSummary(),
       ]);
 
-      if (!towersRes.ok || !summaryRes.ok)
-        throw new Error("Express Gateway disconnected on port 5000");
-
-      const towersRaw: TowerApiRecord[] = await towersRes.json();
-      const summaryData: SystemSummary = await summaryRes.json();
-
-      // Transform raw towers into full production schemas
-      const towersData: Tower[] = towersRaw.map((t) => ({
+      const towersList: Tower[] = towersData.map((t) => ({
         tower_id: t.tower_id,
         grid_id: t.grid_id,
         latitude: t.latitude,
@@ -212,22 +171,22 @@ export default function App() {
         current_state: t.current_state,
         radio_type:
           t.tower_id % 3 === 0 ? "5G NR (Massive MIMO)" : "4G LTE Advanced",
-        baseline_power_w: 418.4,
+        baseline_power_w: STATIC_POWER_P0 + DELTA_P * PMAX,
         optimized_power_w:
           t.current_state === "Deep Sleep"
-            ? 50.0
+            ? STATIC_POWER_P0 * 0.2
             : t.current_state === "Micro-Sleep (ASM)"
-              ? 180.0
-              : 418.4,
+              ? STATIC_POWER_P0 * 0.6 + DELTA_P * (PMAX * (t.current_prb_load / 100.0))
+              : STATIC_POWER_P0 + DELTA_P * (PMAX * (t.current_prb_load / 100.0)),
         pa_temperature_c: parseFloat((42.0 + Math.random() * 12.0).toFixed(1)),
         manual_override: false,
       }));
 
-      setTowers(towersData);
+      setTowers(towersList);
       setSummary(summaryData);
 
-      if (towersData.length > 0) {
-        const firstId = towersData[0].tower_id;
+      if (towersList.length > 0) {
+        const firstId = towersList[0].tower_id;
         setSelectedTowerId(firstId);
         fetchTowerDetails(firstId);
       }
@@ -243,11 +202,11 @@ export default function App() {
           ? err.message
           : "Connection lost to Node.js server on http://localhost:5000";
 
-      setError(message || "Connection lost to Node.js server on http://localhost:5000");
+      setError(message);
     } finally {
       setLoading(false);
     }
-  }, [API_BASE_URL, addLog, fetchTowerDetails]);
+  }, [addLog, fetchTowerDetails]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -285,8 +244,8 @@ export default function App() {
         }
 
         // Calculate power based on 3GPP EARTH parameters
-        const delta_p = 4.2;
-        const Pmax = 40.0;
+        const delta_p = DELTA_P;
+        const Pmax = PMAX;
         const baseline = staticPowerP0 + delta_p * Pmax;
         let optPower: number;
 
@@ -366,17 +325,24 @@ export default function App() {
     }
   }, [autoPilot, selectedTowerId, selectedTowerOpt, staticPowerP0, towers, trafficMultiplier]);
 
+  // Keep a ref to the latest tick so the interval never resets mid-flight
+  const executeSystemTickRef = useRef(executeSystemTick);
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | null = null;
-    if (isPlaying) {
-      interval = setInterval(() => {
-        executeSystemTick();
-      }, 3000 / simSpeed);
+    executeSystemTickRef.current = executeSystemTick;
+  }, [executeSystemTick]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
     }
+    const interval = setInterval(() => {
+      executeSystemTickRef.current();
+    }, 3000 / simSpeed);
+
     return () => {
-      if (interval) clearInterval(interval);
+      clearInterval(interval);
     };
-  }, [executeSystemTick, isPlaying, simSpeed]);
+  }, [isPlaying, simSpeed]);
 
   // ------------------------------------------------------------------
   // 3. INTERACTIVE OPERATOR CONTROLS & BULK ACTIONS
@@ -397,7 +363,7 @@ export default function App() {
       0,
       `GLOBAL OVERRIDE: Dispatched all cell sector nodes to '${targetState}'. Auto-Pilot suspended.`,
     );
-  };
+  }
 
   function handleManualTowerState(
     towerId: number,
@@ -415,7 +381,7 @@ export default function App() {
       towerId,
       `Sector #${towerId} manual override applied: Switched state to ${newState}.`,
     );
-  };
+  }
 
   function handleReleaseOverride(towerId: number) {
     setTowers((prev) =>
@@ -428,7 +394,7 @@ export default function App() {
       towerId,
       `Sector #${towerId} manual override released. Reverted control to Auto-Pilot.`,
     );
-  };
+  }
 
   // ------------------------------------------------------------------
   // 4. FILTERED DATA COMPUTATION & MEMOIZATION
@@ -451,9 +417,9 @@ export default function App() {
     ).length;
     const deep = towers.filter((t) => t.current_state === "Deep Sleep").length;
     return [
-      { name: "Full Power", value: full, color: "#ee0000" },
+      { name: "Full Power", value: full, color: "#171717" },
       { name: "Micro-Sleep", value: micro, color: "#f5a623" },
-      { name: "Deep Sleep", value: deep, color: "#10b981" },
+      { name: "Deep Sleep", value: deep, color: "#50e3c2" },
     ];
   }, [towers]);
 
@@ -464,27 +430,33 @@ export default function App() {
   const getMarkerColor = (state: string) => {
     switch (state) {
       case "Full Power":
-        return "#ee0000"; // Red
+        return "#171717";
       case "Micro-Sleep (ASM)":
-        return "#f5a623"; // Amber
+        return "#f5a623";
       case "Deep Sleep":
-        return "#10b981"; // Green
+        return "#50e3c2";
       default:
-        return "#0070f3"; // Brand link blue
+        return "#0070f3";
     }
   };
 
-  // ------------------------------------------------------------------
-  // 5. RENDER: LOADING / ERROR / MAIN APPLICATION SHELL
-  // ------------------------------------------------------------------
+  const getStateBadgeClass = (state: string) => {
+    switch (state) {
+      case "Deep Sleep":
+        return "bg-cyan-soft text-ink";
+      case "Micro-Sleep (ASM)":
+        return "bg-warning-soft text-warning-deep";
+      default:
+        return "bg-canvas border border-hairline text-ink";
+    }
+  };
+
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-canvas">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-9 w-9 animate-spin rounded-full border-2 border-hairline border-t-ink" />
-          <p className="font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-mute">
-            Connecting to Telecom AI NOC Engine…
-          </p>
+      <div className="flex items-center justify-center h-screen bg-canvas font-mono text-sm">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-9 h-9 border-4 border-hairline border-t-ink rounded-full animate-spin"></div>
+          <span className="text-body">Connecting to Real-Time Telecom Telemetry Engine...</span>
         </div>
       </div>
     );
@@ -492,44 +464,37 @@ export default function App() {
 
   if (error) {
     return (
-      <div className="flex h-screen items-center justify-center bg-canvas p-6">
-        <div className="w-full max-w-md rounded-lg border border-hairline bg-elevated p-8 text-center">
-          <p className="mb-3 font-mono text-[12px] font-medium uppercase tracking-[0.08em] text-error">
-            Gateway Disconnected
-          </p>
-          <h2 className="mb-2 text-[20px] font-semibold tracking-[-0.4px] text-ink">
-            Unable to reach the Node.js API
-          </h2>
-          <p className="mb-6 text-sm leading-6 text-body">{error}</p>
-          <button
-            onClick={() => void loadInitialData()}
-            className="rounded-sm bg-ink px-5 py-2.5 text-[14px] font-medium text-white transition-colors hover:bg-ink/90"
-          >
-            Retry Express Server Connection
-          </button>
-        </div>
+      <div className="flex flex-col items-center justify-center h-screen bg-canvas text-ink p-6 font-sans">
+        <h2 className="text-2xl font-bold mb-2">Telemetry Gateway Unavailable</h2>
+        <p className="text-body mb-4 text-center max-w-md">{error}</p>
+        <button
+          onClick={loadInitialData}
+          className="px-5 py-2.5 bg-ink text-white rounded-sm hover:bg-ink/90 font-semibold text-sm transition-all"
+        >
+          Retry Gateway Connection
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-canvas font-sans text-ink">
+    <div className="flex h-screen bg-canvas text-ink font-sans overflow-hidden">
       {/* ------------------------------------------------------------------ */}
       {/* LEFT NAVIGATION SIDEBAR                                             */}
       {/* ------------------------------------------------------------------ */}
-      <aside className="flex w-64 shrink-0 flex-col justify-between border-r border-hairline bg-elevated">
+      <aside className="w-64 bg-canvas-elevated border-r border-hairline flex flex-col justify-between shrink-0">
         <div>
           {/* Logo Branding */}
-          <div className="border-b border-hairline p-5">
+          <div className="p-5 border-b border-hairline">
             <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm bg-ink text-[15px] font-bold text-white">
+              <div className="w-9 h-9 rounded-full bg-ink flex items-center justify-center text-white font-bold text-lg">
                 ⚡
               </div>
               <div>
-                <h1 className="text-[15px] font-semibold leading-tight tracking-[-0.2px] text-ink">
+                <h1 className="font-bold text-sm text-ink leading-tight">
                   Telecom AI NOC
                 </h1>
-                <p className="mt-0.5 font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                <p className="text-[10px] text-mute font-mono">
                   3GPP Release 18 Energy Engine
                 </p>
               </div>
@@ -537,13 +502,13 @@ export default function App() {
           </div>
 
           {/* Navigation Links */}
-          <nav className="space-y-1 p-3">
+          <nav className="p-3 space-y-1">
             <button
               onClick={() => setActiveTab("telemetry")}
-              className={`flex w-full items-center gap-3 rounded-sm px-3 py-2.5 text-[13px] transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "telemetry"
-                  ? "bg-ink font-medium text-white"
-                  : "font-normal text-body hover:bg-hairline-soft hover:text-ink"
+                  ? "bg-ink text-white"
+                  : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
               <span>🌐</span> Real-Time Sector Map
@@ -551,21 +516,21 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("analytics")}
-              className={`flex w-full items-center gap-3 rounded-sm px-3 py-2.5 text-[13px] transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "analytics"
-                  ? "bg-ink font-medium text-white"
-                  : "font-normal text-body hover:bg-hairline-soft hover:text-ink"
+                  ? "bg-ink text-white"
+                  : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
-              <span>📊</span> Power &amp; Load Analytics
+              <span>📊</span> Power & Load Analytics
             </button>
 
             <button
               onClick={() => setActiveTab("simulation")}
-              className={`flex w-full items-center gap-3 rounded-sm px-3 py-2.5 text-[13px] transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "simulation"
-                  ? "bg-ink font-medium text-white"
-                  : "font-normal text-body hover:bg-hairline-soft hover:text-ink"
+                  ? "bg-ink text-white"
+                  : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
               <span>🎛️</span> What-If Stress Simulator
@@ -573,10 +538,10 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("hardware")}
-              className={`flex w-full items-center gap-3 rounded-sm px-3 py-2.5 text-[13px] transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "hardware"
-                  ? "bg-ink font-medium text-white"
-                  : "font-normal text-body hover:bg-hairline-soft hover:text-ink"
+                  ? "bg-ink text-white"
+                  : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
               <span>🔧</span> 3GPP EARTH Tuning
@@ -584,10 +549,10 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("logs")}
-              className={`flex w-full items-center gap-3 rounded-sm px-3 py-2.5 text-[13px] transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-sm text-xs font-medium transition-all ${
                 activeTab === "logs"
-                  ? "bg-ink font-medium text-white"
-                  : "font-normal text-body hover:bg-hairline-soft hover:text-ink"
+                  ? "bg-ink text-white"
+                  : "text-body hover:bg-canvas hover:text-ink"
               }`}
             >
               <span>📋</span> System Audit Trail
@@ -596,69 +561,63 @@ export default function App() {
         </div>
 
         {/* Real-time Ticker & Auto-Pilot Footer */}
-        <div className="border-t border-hairline p-4">
-          <div className="rounded-md border border-hairline bg-canvas p-4">
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-2 font-mono text-[11px] text-body">
-                <span
-                  className={`h-2 w-2 rounded-full ${
-                    isPlaying ? "bg-link animate-pulse" : "bg-warning"
-                  }`}
-                />
-                {isPlaying ? "Live Stream" : "Paused"}
-              </span>
-              <span className="font-mono text-[10px] text-mute">
-                Tick #{tickCount}
-              </span>
-            </div>
+        <div className="p-4 border-t border-hairline text-xs font-mono space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <span
+                className={`w-2.5 h-2.5 rounded-full ${isPlaying ? "bg-cyan animate-pulse" : "bg-warning"}`}
+              ></span>
+              <strong className="text-ink">
+                {isPlaying ? "LIVE STREAM" : "PAUSED"}
+              </strong>
+            </span>
+            <span className="text-[10px] text-mute">Tick #{tickCount}</span>
+          </div>
 
-            <div className="mt-3 flex items-center justify-between rounded-md border border-hairline bg-elevated px-3 py-2">
-              <span className="font-mono text-[11px] text-body">
-                AI Auto-Pilot:
-              </span>
-              <button
-                onClick={() => {
-                  setAutoPilot(!autoPilot);
-                  addLog(
-                    "INFO",
-                    0,
-                    `Auto-Pilot set to ${!autoPilot ? "ENABLED" : "DISABLED"}`,
-                  );
-                }}
-                className={`rounded-sm px-2.5 py-0.5 text-[10px] font-bold transition-colors ${
-                  autoPilot
-                    ? "border border-link/40 bg-link/10 text-link"
-                    : "border border-hairline bg-elevated text-mute"
-                }`}
-              >
-                {autoPilot ? "ACTIVE" : "OFF"}
-              </button>
-            </div>
+          <div className="flex items-center justify-between bg-canvas p-2 rounded-sm border border-hairline">
+            <span className="text-body text-[11px]">AI Auto-Pilot:</span>
+            <button
+              onClick={() => {
+                setAutoPilot(!autoPilot);
+                addLog(
+                  "INFO",
+                  0,
+                  `Auto-Pilot set to ${!autoPilot ? "ENABLED" : "DISABLED"}`,
+                );
+              }}
+              className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold transition-all ${
+                autoPilot
+                  ? "bg-link-soft text-link-deep border border-link/40"
+                  : "bg-canvas border border-hairline text-body"
+              }`}
+            >
+              {autoPilot ? "ACTIVE" : "OFF"}
+            </button>
+          </div>
 
-            <div className="mt-3 flex items-center gap-2">
-              <button
-                onClick={() => setIsPlaying(!isPlaying)}
-                className="flex flex-1 items-center justify-center rounded-sm bg-elevated py-1.5 text-[11px] font-semibold text-ink border border-hairline transition-colors hover:bg-hairline-soft"
-              >
-                {isPlaying ? "⏸ Pause" : "▶ Play"}
-              </button>
-              <button
-                onClick={() => executeSystemTick()}
-                className="rounded-sm bg-elevated px-2.5 py-1.5 text-[11px] font-semibold text-body border border-hairline transition-colors hover:bg-hairline-soft hover:text-ink"
-                title="Step forward 1 tick"
-              >
-                ⏭ Step
-              </button>
-              <select
-                value={simSpeed}
-                onChange={(e) => setSimSpeed(Number(e.target.value))}
-                className="rounded-sm border border-hairline bg-elevated px-2 py-1.5 font-mono text-[11px] text-ink focus:outline-none"
-              >
-                <option value={1}>1x</option>
-                <option value={2}>2x</option>
-                <option value={5}>5x</option>
-              </select>
-            </div>
+          <div className="flex items-center gap-1.5 pt-1">
+            <button
+              onClick={() => setIsPlaying(!isPlaying)}
+              className="flex-1 py-1.5 bg-canvas-elevated hover:bg-hairline text-ink border border-hairline rounded-sm font-sans text-[11px] font-semibold transition-all"
+            >
+              {isPlaying ? "⏸ Pause" : "▶ Play"}
+            </button>
+            <button
+              onClick={() => executeSystemTick()}
+              className="px-2.5 py-1.5 bg-canvas-elevated hover:bg-hairline text-ink border border-hairline rounded-sm font-sans text-[11px] font-semibold transition-all"
+              title="Step forward 1 tick"
+            >
+              ⏭ Step
+            </button>
+            <select
+              value={simSpeed}
+              onChange={(e) => setSimSpeed(Number(e.target.value))}
+              className="bg-canvas-elevated text-ink px-2 py-1.5 rounded-sm text-[11px] font-sans focus:outline-none"
+            >
+              <option value={1}>1x</option>
+              <option value={2}>2x</option>
+              <option value={5}>5x</option>
+            </select>
           </div>
         </div>
       </aside>
@@ -666,39 +625,68 @@ export default function App() {
       {/* ------------------------------------------------------------------ */}
       {/* MAIN WORKSPACE VIEW                                                 */}
       {/* ------------------------------------------------------------------ */}
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <main className="flex-grow flex flex-col overflow-hidden">
         {/* TOP METRICS & KPI HEADER */}
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-hairline bg-canvas px-6">
-          <div className="flex items-center gap-4">
-            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-mute">
-              Telecom AI NOC
-            </p>
-            <div className="h-6 w-px bg-hairline" />
-            <h2 className="text-[15px] font-semibold tracking-[-0.2px] text-ink">
-              Live Network Operations
-            </h2>
+        <header className="h-16 bg-canvas-elevated border-b border-hairline px-6 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-6">
+            <div>
+              <span className="text-[10px] text-mute font-mono uppercase tracking-wider">
+                Active Sectors
+              </span>
+              <div className="text-sm font-bold text-ink">
+                {summary?.active_towers} / {summary?.total_towers} Nodes
+              </div>
+            </div>
+            <div className="h-8 w-px bg-hairline"></div>
+            <div>
+              <span className="text-[10px] text-mute font-mono uppercase tracking-wider">
+                Avg Network PRB Load
+              </span>
+              <div className="text-sm font-bold text-ink">
+                {summary?.average_prb_load}% Utilization
+              </div>
+            </div>
+            <div className="h-8 w-px bg-hairline"></div>
+            <div>
+              <span className="text-[10px] text-mute font-mono uppercase tracking-wider">
+                Continuous Baseline
+              </span>
+              <div className="text-sm font-bold text-ink">
+                {summary?.total_baseline_kwh} kWh
+              </div>
+            </div>
+            <div className="h-8 w-px bg-hairline"></div>
+            <div>
+              <span className="text-[10px] text-mute font-mono uppercase tracking-wider">
+                AI Optimized Power
+              </span>
+              <div className="text-sm font-bold text-ink">
+                {summary?.total_optimized_kwh} kWh (
+                {summary?.savings_percentage}% Saved)
+              </div>
+            </div>
           </div>
 
           {/* Quick Bulk Action Buttons */}
           <div className="flex items-center gap-2">
-            <span className="mr-1 font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+            <span className="text-[10px] font-mono text-mute uppercase mr-1">
               Bulk Override:
             </span>
             <button
               onClick={() => handleBulkStateChange("Deep Sleep")}
-              className="rounded-sm bg-ink px-2.5 py-1 text-[10px] font-bold text-white transition-colors hover:bg-ink/90"
+              className="px-2.5 py-1 bg-cyan-soft text-ink border border-hairline rounded-sm text-[10px] font-mono font-bold transition-all"
             >
               🌙 Deep Sleep
             </button>
             <button
               onClick={() => handleBulkStateChange("Micro-Sleep (ASM)")}
-              className="rounded-sm border border-hairline bg-elevated px-2.5 py-1 text-[10px] font-bold text-body transition-colors hover:bg-hairline-soft hover:text-ink"
+              className="px-2.5 py-1 bg-warning-soft text-warning-deep border border-hairline rounded-sm text-[10px] font-mono font-bold transition-all"
             >
               ⚡ ASM Sleep
             </button>
             <button
               onClick={() => handleBulkStateChange("Full Power")}
-              className="rounded-sm border border-hairline bg-elevated px-2.5 py-1 text-[10px] font-bold text-body transition-colors hover:bg-hairline-soft hover:text-ink"
+              className="px-2.5 py-1 bg-canvas-elevated text-ink border border-hairline rounded-sm text-[10px] font-mono font-bold transition-all"
             >
               🔥 Full Power
             </button>
@@ -706,312 +694,254 @@ export default function App() {
         </header>
 
         {/* WORKSPACE CONTENT AREA */}
-        <div className="min-h-0 flex-1 overflow-y-auto p-6">
-          <div className="space-y-6">
-            {/* KPI STAT ROW */}
-            {summary && (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-md border border-hairline bg-elevated p-5">
-                  <span className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-mute">
-                    Active Sectors
-                  </span>
-                  <p className="mt-2 text-[20px] font-semibold tracking-[-0.4px] text-ink">
-                    {summary.active_towers}{" "}
-                    <span className="text-sm font-normal text-body">
-                      / {summary.total_towers} Nodes
-                    </span>
-                  </p>
-                </div>
-                <div className="rounded-md border border-hairline bg-elevated p-5">
-                  <span className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-mute">
-                    Avg Network PRB Load
-                  </span>
-                  <p className="mt-2 text-[20px] font-semibold tracking-[-0.4px] text-ink">
-                    {summary.average_prb_load}
-                    <span className="text-sm font-normal text-body">% Utilization</span>
-                  </p>
-                </div>
-                <div className="rounded-md border border-hairline bg-elevated p-5">
-                  <span className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-mute">
-                    Continuous Baseline
-                  </span>
-                  <p className="mt-2 text-[20px] font-semibold tracking-[-0.4px] text-ink">
-                    {summary.total_baseline_kwh}{" "}
-                    <span className="text-sm font-normal text-body">kWh</span>
-                  </p>
-                </div>
-                <div className="rounded-md border border-hairline bg-elevated p-5">
-                  <span className="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-mute">
-                    AI Optimized Power
-                  </span>
-                  <p className="mt-2 text-[20px] font-semibold tracking-[-0.4px] text-ink">
-                    {summary.total_optimized_kwh}{" "}
-                    <span className="text-sm font-normal text-body">
-                      kWh ({summary.savings_percentage}% Saved)
-                    </span>
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* ------------------------------------------------------------------ */}
-            {/* TAB 1: REAL-TIME SECTOR MAP & LIVE TELEMETRY DRAWER               */}
-            {/* ------------------------------------------------------------------ */}
-            {activeTab === "telemetry" && (
-              <div className="grid min-h-[580px] grid-cols-1 gap-6 lg:grid-cols-3">
-                {/* Sector Telemetry Map / Grid View */}
-                <div className="flex flex-col rounded-md border border-hairline bg-elevated lg:col-span-2">
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline p-4">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
-                        Geospatial Delhi NCR OpenStreetMap
-                      </h2>
-                      <div className="flex items-center rounded-sm border border-hairline bg-elevated p-0.5 text-xs">
-                        <button
-                          onClick={() => setViewMode("map")}
-                          className={`rounded-sm px-3 py-1 text-[12px] font-medium transition-colors ${
-                            viewMode === "map"
-                              ? "bg-ink text-white"
-                              : "text-body hover:text-ink"
-                          }`}
-                        >
-                          Map View
-                        </button>
-                        <button
-                          onClick={() => setViewMode("table")}
-                          className={`rounded-sm px-3 py-1 text-[12px] font-medium transition-colors ${
-                            viewMode === "table"
-                              ? "bg-ink text-white"
-                              : "text-body hover:text-ink"
-                          }`}
-                        >
-                          Grid Table
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Filter & Search Bar */}
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        placeholder="Search Sector ID..."
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-36 rounded-sm border border-hairline bg-elevated px-3 py-1.5 font-mono text-[12px] text-ink placeholder:text-faint focus:outline-none focus:border-ink"
-                      />
-                      <select
-                        value={stateFilter}
-                        onChange={(e) => setStateFilter(e.target.value)}
-                        className="rounded-sm border border-hairline bg-elevated px-3 py-1.5 font-mono text-[12px] text-ink focus:outline-none"
+        <div className="flex-grow p-6 overflow-y-auto">
+          {/* ------------------------------------------------------------------ */}
+          {/* TAB 1: REAL-TIME SECTOR MAP & LIVE TELEMETRY DRAWER               */}
+          {/* ------------------------------------------------------------------ */}
+          {activeTab === "telemetry" && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full min-h-[580px]">
+              {/* Sector Telemetry Map / Grid View */}
+              <div className="lg:col-span-2 bg-canvas-elevated border border-hairline rounded-md p-4 flex flex-col">
+                <div className="flex justify-between items-center mb-4">
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-sm font-bold text-ink uppercase tracking-wider">
+                      Geospatial Delhi NCR OpenStreetMap
+                    </h2>
+                    <div className="flex items-center bg-canvas border border-hairline rounded-sm p-0.5 text-xs">
+                      <button
+                        onClick={() => setViewMode("map")}
+                        className={`px-3 py-1 rounded-sm font-medium transition-all ${
+                          viewMode === "map"
+                            ? "bg-ink text-white"
+                            : "text-body hover:text-ink"
+                        }`}
                       >
-                        <option value="ALL">All States</option>
-                        <option value="Full Power">Full Power</option>
-                        <option value="Micro-Sleep (ASM)">Micro-Sleep</option>
-                        <option value="Deep Sleep">Deep Sleep</option>
-                      </select>
+                        Map View
+                      </button>
+                      <button
+                        onClick={() => setViewMode("table")}
+                        className={`px-3 py-1 rounded-sm font-medium transition-all ${
+                          viewMode === "table"
+                            ? "bg-ink text-white"
+                            : "text-body hover:text-ink"
+                        }`}
+                      >
+                        Grid Table
+                      </button>
                     </div>
                   </div>
 
-                  {/* OpenStreetMap Component */}
-                  {viewMode === "map" ? (
-                    <div className="relative min-h-[440px] flex-1 overflow-hidden rounded-b-md border-t border-hairline">
-                      {towers.length > 0 && (
-                        <MapContainer
+                  {/* Filter & Search Bar */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="Search Sector ID..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="bg-canvas border border-hairline text-xs text-ink px-3 py-1.5 rounded-sm focus:outline-none focus:border-ink w-36 placeholder:text-mute"
+                    />
+                    <select
+                      value={stateFilter}
+                      onChange={(e) => setStateFilter(e.target.value)}
+                      className="bg-canvas border border-hairline text-xs text-ink px-3 py-1.5 rounded-sm focus:outline-none focus:border-ink"
+                    >
+                      <option value="ALL">All States</option>
+                      <option value="Full Power">Full Power</option>
+                      <option value="Micro-Sleep (ASM)">Micro-Sleep</option>
+                      <option value="Deep Sleep">Deep Sleep</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* OpenStreetMap Component */}
+                {viewMode === "map" ? (
+                  <div className="w-full flex-grow rounded-md overflow-hidden border border-hairline relative min-h-[440px]">
+                    {towers.length > 0 && (
+                      <MapContainer
+                        center={[
+                          towers.find((t) => t.tower_id === selectedTowerId)
+                            ?.latitude || towers[0].latitude,
+                          towers.find((t) => t.tower_id === selectedTowerId)
+                            ?.longitude || towers[0].longitude,
+                        ]}
+                        zoom={12}
+                        style={{ height: "100%", width: "100%" }}
+                      >
+                        <ChangeMapView
                           center={[
                             towers.find((t) => t.tower_id === selectedTowerId)
                               ?.latitude || towers[0].latitude,
                             towers.find((t) => t.tower_id === selectedTowerId)
                               ?.longitude || towers[0].longitude,
                           ]}
-                          zoom={12}
-                          style={{ height: "100%", width: "100%" }}
-                        >
-                          <ChangeMapView
-                            center={[
-                              towers.find((t) => t.tower_id === selectedTowerId)
-                                ?.latitude || towers[0].latitude,
-                              towers.find((t) => t.tower_id === selectedTowerId)
-                                ?.longitude || towers[0].longitude,
-                            ]}
-                          />
-                          <TileLayer url={OSM_TILE_URL} />
-                          {filteredTowers.map((tower) => (
-                            <CircleMarker
-                              key={tower.tower_id}
-                              center={[tower.latitude, tower.longitude]}
-                              radius={selectedTowerId === tower.tower_id ? 11 : 7}
-                              pathOptions={{
-                                color:
-                                  selectedTowerId === tower.tower_id
-                                    ? "#171717"
-                                    : getMarkerColor(tower.current_state),
-                                fillColor: getMarkerColor(tower.current_state),
-                                fillOpacity: 0.85,
-                                weight:
-                                  selectedTowerId === tower.tower_id ? 3 : 1,
-                              }}
-                              eventHandlers={{
-                                click: () => {
-                                  setSelectedTowerId(tower.tower_id);
-                                  fetchTowerDetails(tower.tower_id);
-                                },
-                              }}
-                            >
-                              <Popup>
-                                <div className="rounded-md border border-hairline bg-elevated px-3 py-2 font-sans text-[12px] text-ink">
-                                  <strong>Sector Node #{tower.tower_id}</strong>
-                                  <br />
-                                  PRB Load: {tower.current_prb_load}%
-                                  <br />
-                                  State: <em>{tower.current_state}</em>
-                                </div>
-                              </Popup>
-                            </CircleMarker>
-                          ))}
-                        </MapContainer>
-                      )}
-                    </div>
-                  ) : (
-                    /* Telemetry Grid Table */
-                    <div className="flex-1 overflow-y-auto rounded-b-md border-t border-hairline bg-canvas">
-                      <table className="w-full border-collapse text-left font-mono text-xs">
-                        <thead>
-                          <tr className="border-b border-hairline bg-canvas text-[11px] uppercase text-mute">
-                            <th className="p-3">Sector ID</th>
-                            <th className="p-3">Radio Stack</th>
-                            <th className="p-3">PRB Load</th>
-                            <th className="p-3">Power (W)</th>
-                            <th className="p-3">PA Temp</th>
-                            <th className="p-3">Operating State</th>
-                            <th className="p-3">Action</th>
+                        />
+                        <TileLayer url={OSM_TILE_URL} />
+                        {filteredTowers.map((tower) => (
+                          <CircleMarker
+                            key={tower.tower_id}
+                            center={[tower.latitude, tower.longitude]}
+                            radius={selectedTowerId === tower.tower_id ? 11 : 7}
+                            pathOptions={{
+                              color:
+                                selectedTowerId === tower.tower_id
+                                  ? "#171717"
+                                  : getMarkerColor(tower.current_state),
+                              fillColor: getMarkerColor(tower.current_state),
+                              fillOpacity: 0.85,
+                              weight:
+                                selectedTowerId === tower.tower_id ? 3 : 1,
+                            }}
+                            eventHandlers={{
+                              click: () => {
+                                setSelectedTowerId(tower.tower_id);
+                                fetchTowerDetails(tower.tower_id);
+                              },
+                            }}
+                          >
+                            <Popup>
+                              <div className="text-ink font-sans text-xs">
+                                <strong>Sector Node #{tower.tower_id}</strong>
+                                <br />
+                                PRB Load: {tower.current_prb_load}%
+                                <br />
+                                State: <em>{tower.current_state}</em>
+                              </div>
+                            </Popup>
+                          </CircleMarker>
+                        ))}
+                      </MapContainer>
+                    )}
+                  </div>
+                ) : (
+                  /* Telemetry Grid Table */
+                  <div className="w-full flex-grow overflow-y-auto rounded-md border border-hairline bg-canvas-elevated">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-hairline bg-canvas text-mute font-mono uppercase">
+                          <th className="p-3">Sector ID</th>
+                          <th className="p-3">Radio Stack</th>
+                          <th className="p-3">PRB Load</th>
+                          <th className="p-3">Power (W)</th>
+                          <th className="p-3">PA Temp</th>
+                          <th className="p-3">Operating State</th>
+                          <th className="p-3">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-hairline-soft font-mono">
+                        {filteredTowers.map((t) => (
+                          <tr
+                            key={t.tower_id}
+                            className={`hover:bg-canvas transition-colors ${
+                              selectedTowerId === t.tower_id ? "bg-canvas" : ""
+                            }`}
+                          >
+                            <td className="p-3 font-bold text-ink">
+                              #{t.tower_id}
+                            </td>
+                            <td className="p-3 text-body">{t.radio_type}</td>
+                            <td className="p-3 text-ink font-bold">
+                              {t.current_prb_load}%
+                            </td>
+                            <td className="p-3 text-ink font-bold">
+                              {t.optimized_power_w} W
+                            </td>
+                            <td className="p-3 text-body">
+                              {t.pa_temperature_c} °C
+                            </td>
+                            <td className="p-3">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${getStateBadgeClass(t.current_state)}`}
+                              >
+                                {t.current_state}
+                              </span>
+                            </td>
+                            <td className="p-3">
+                              <button
+                                onClick={() => {
+                                  setSelectedTowerId(t.tower_id);
+                                  fetchTowerDetails(t.tower_id);
+                                }}
+                                className="px-2.5 py-1 bg-ink text-white rounded-sm text-[10px] font-sans font-semibold"
+                              >
+                                Inspect Node
+                              </button>
+                            </td>
                           </tr>
-                        </thead>
-                        <tbody className="divide-y divide-hairline font-mono">
-                          {filteredTowers.map((t) => (
-                            <tr
-                              key={t.tower_id}
-                              className={`transition-colors hover:bg-hairline-soft ${
-                                selectedTowerId === t.tower_id ? "bg-hairline-soft" : ""
-                              }`}
-                            >
-                              <td className="p-3 font-bold text-link">
-                                #{t.tower_id}
-                              </td>
-                              <td className="p-3 text-body">{t.radio_type}</td>
-                              <td className="p-3 font-bold text-ink">
-                                {t.current_prb_load}%
-                              </td>
-                              <td className="p-3 font-bold text-ink">
-                                {t.optimized_power_w} W
-                              </td>
-                              <td className="p-3 text-body">
-                                {t.pa_temperature_c} °C
-                              </td>
-                              <td className="p-3">
-                                <span
-                                  className={`rounded-sm px-2 py-0.5 text-[10px] font-bold ${
-                                    t.current_state === "Deep Sleep"
-                                      ? "bg-emerald-500/10 text-emerald-600"
-                                      : t.current_state === "Micro-Sleep (ASM)"
-                                        ? "bg-amber-500/10 text-amber-600"
-                                        : "bg-red-500/10 text-red-600"
-                                  }`}
-                                >
-                                  {t.current_state}
-                                </span>
-                              </td>
-                              <td className="p-3">
-                                <button
-                                  onClick={() => {
-                                    setSelectedTowerId(t.tower_id);
-                                    fetchTowerDetails(t.tower_id);
-                                  }}
-                                  className="rounded-sm bg-ink px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-ink/90"
-                                >
-                                  Inspect Node
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
 
-                {/* Dynamic Live Telemetry Inspector Drawer */}
-                <div className="flex flex-col rounded-md border border-hairline bg-elevated p-5">
-                  <h2 className="mb-4 text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
+              {/* Dynamic Live Telemetry Inspector Drawer */}
+              <div className="bg-canvas-elevated border border-hairline rounded-md p-5 flex flex-col justify-between">
+                <div>
+                  <h2 className="text-sm font-bold text-ink uppercase tracking-wider mb-4">
                     AI Operational Recommendation Queue
                   </h2>
 
                   {selectedTower ? (
-                    <div className="flex flex-1 flex-col justify-between gap-4">
+                    <div className="space-y-4">
                       {/* Node Header */}
-                      <div className="flex items-center justify-between rounded-md border border-hairline bg-canvas p-4">
+                      <div className="bg-canvas p-4 rounded-md border border-hairline flex justify-between items-center">
                         <div>
-                          <span className="block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                          <span className="text-[10px] text-mute font-mono uppercase">
                             Selected Base Station
                           </span>
-                          <div className="mt-0.5 text-[20px] font-semibold tracking-[-0.4px] text-link">
+                          <div className="text-xl font-bold text-ink">
                             Sector #{selectedTower.tower_id}
                           </div>
-                          <span className="mt-0.5 font-mono text-[11px] text-body">
+                          <span className="text-xs text-body font-mono">
                             {selectedTower.radio_type}
                           </span>
                         </div>
                         {selectedTower.manual_override ? (
-                          <span className="rounded-sm border border-amber-500/40 bg-amber-500/10 px-2 py-1 font-mono text-[10px] font-bold text-amber-600">
+                          <span className="px-2 py-1 bg-warning-soft text-warning-deep border border-warning/40 rounded-full text-[10px] font-mono font-bold">
                             MANUAL OVERRIDE
                           </span>
                         ) : (
-                          <span className="rounded-sm border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 font-mono text-[10px] font-bold text-emerald-600">
+                          <span className="px-2 py-1 bg-cyan-soft text-ink border border-hairline rounded-full text-[10px] font-mono font-bold">
                             AI AUTO-PILOT
                           </span>
                         )}
                       </div>
 
                       {/* Live Load & Hardware Gauges */}
-                      <div className="grid grid-cols-2 gap-3 font-mono text-xs">
-                        <div className="rounded-md border border-hairline bg-canvas p-3.5">
-                          <span className="block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                      <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                        <div className="bg-canvas p-3.5 rounded-md border border-hairline">
+                          <span className="text-mute text-[10px] block uppercase">
                             PRB Load Demand
                           </span>
-                          <span className="mt-1 block text-[15px] font-bold text-ink">
+                          <span className="font-bold text-ink text-base">
                             {selectedTower.current_prb_load}%
                           </span>
                         </div>
-                        <div className="rounded-md border border-hairline bg-canvas p-3.5">
-                          <span className="block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                        <div className="bg-canvas p-3.5 rounded-md border border-hairline">
+                          <span className="text-mute text-[10px] block uppercase">
                             PA Thermal Reading
                           </span>
-                          <span className="mt-1 block text-[15px] font-bold text-ink">
+                          <span className="font-bold text-ink text-base">
                             {selectedTower.pa_temperature_c} °C
                           </span>
                         </div>
                       </div>
 
                       {/* Power State Controls */}
-                      <div className="space-y-2 rounded-md border border-hairline bg-canvas p-4">
-                        <span className="mb-1 block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                      <div className="bg-canvas p-4 rounded-md border border-hairline space-y-2">
+                        <span className="text-mute text-[10px] font-mono uppercase block mb-1">
                           Operating Power State
                         </span>
                         <div className="flex items-center gap-2">
                           <span
-                            className={`flex-1 rounded-lg border px-3 py-1.5 text-center text-xs font-bold ${
-                              selectedTower.current_state === "Deep Sleep"
-                                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
-                                : selectedTower.current_state === "Micro-Sleep (ASM)"
-                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-600"
-                                  : "border-red-500/40 bg-red-500/10 text-red-600"
-                            }`}
+                            className={`flex-1 px-3 py-1.5 rounded-sm text-xs font-bold text-center ${getStateBadgeClass(selectedTower.current_state)}`}
                           >
                             {selectedTower.current_state}
                           </span>
                         </div>
 
                         {/* Manual Operator Switch Buttons */}
-                        <div className="flex items-center gap-1.5 pt-2 font-mono text-[10px]">
+                        <div className="pt-2 flex items-center gap-1.5 font-mono text-[10px]">
                           <button
                             onClick={() =>
                               handleManualTowerState(
@@ -1019,7 +949,7 @@ export default function App() {
                                 "Deep Sleep",
                               )
                             }
-                            className="flex-1 rounded-md border border-hairline bg-elevated py-1 text-ink transition-colors hover:bg-hairline-soft"
+                            className="flex-1 py-1 bg-canvas-elevated hover:bg-hairline text-ink border border-hairline rounded-sm transition-all"
                           >
                             Set Deep Sleep
                           </button>
@@ -1030,7 +960,7 @@ export default function App() {
                                 "Micro-Sleep (ASM)",
                               )
                             }
-                            className="flex-1 rounded-md border border-hairline bg-elevated py-1 text-ink transition-colors hover:bg-hairline-soft"
+                            className="flex-1 py-1 bg-canvas-elevated hover:bg-hairline text-ink border border-hairline rounded-sm transition-all"
                           >
                             Set ASM Sleep
                           </button>
@@ -1039,7 +969,7 @@ export default function App() {
                               onClick={() =>
                                 handleReleaseOverride(selectedTower.tower_id)
                               }
-                              className="rounded-md bg-link px-2 py-1 font-semibold text-white"
+                              className="px-2 py-1 bg-canvas border border-hairline text-ink rounded-sm"
                               title="Release manual override back to AI Auto-Pilot"
                             >
                               Reset
@@ -1049,8 +979,8 @@ export default function App() {
                       </div>
 
                       {/* Real-time Dynamic Line Chart */}
-                      <div className="flex-1 rounded-md border border-hairline bg-canvas p-3">
-                        <span className="mb-2 block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                      <div className="bg-canvas p-3 rounded-md border border-hairline">
+                        <span className="text-[10px] font-mono text-mute uppercase block mb-2">
                           Real-Time PRB Load Stream
                         </span>
                         <div className="h-28 w-full">
@@ -1062,22 +992,20 @@ export default function App() {
                               />
                               <XAxis
                                 dataKey="time"
-                                stroke="#ebebeb"
-                                tick={{ fontSize: 10, fill: "#8f8f8f" }}
-                                tickLine={false}
+                                stroke="#8f8f8f"
+                                tick={{ fontSize: 9 }}
                               />
                               <YAxis
                                 domain={[0, 100]}
-                                stroke="#ebebeb"
-                                tick={{ fontSize: 10, fill: "#8f8f8f" }}
-                                tickLine={false}
+                                stroke="#8f8f8f"
+                                tick={{ fontSize: 9 }}
                               />
                               <Tooltip
                                 contentStyle={{
                                   backgroundColor: "#ffffff",
-                                  border: "1px solid #ebebeb",
-                                  borderRadius: "12px",
+                                  borderColor: "#ebebeb",
                                   fontSize: "11px",
+                                  color: "#171717",
                                 }}
                               />
                               <Line
@@ -1102,260 +1030,262 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="rounded-md border border-link-soft bg-link-soft p-3.5 text-[12px] leading-relaxed text-body">
-                        💡 <strong className="font-semibold text-ink">Action Rationale:</strong>{" "}
-                        Base station consumes {selectedTower.optimized_power_w}W (saving{" "}
-                        {418.4 - selectedTower.optimized_power_w}W baseline power).
+                      <div className="bg-link-soft border border-hairline p-3.5 rounded-md text-xs text-body leading-relaxed">
+                        💡 <strong className="text-ink">Action Rationale:</strong> Base station consumes {selectedTower.optimized_power_w}W (saving{" "}
+                        {selectedTower.baseline_power_w - selectedTower.optimized_power_w}W baseline power).
                       </div>
                     </div>
                   ) : (
-                    <div className="flex-1 text-sm text-mute">
+                    <div className="text-mute text-xs">
                       Select a sector node on the map to inspect telemetry.
                     </div>
                   )}
                 </div>
-              </div>
-            )}
 
-            {/* ------------------------------------------------------------------ */}
-            {/* TAB 2: POWER & LOAD ANALYTICS HUB                                   */}
-            {/* ------------------------------------------------------------------ */}
-            {activeTab === "analytics" && (
-              <div className="space-y-6">
-                <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-                  {/* Chart 1: Continuous Baseline vs AI Power Stream */}
-                  <div className="rounded-md border border-hairline bg-elevated p-5 lg:col-span-2">
-                    <h3 className="mb-3 text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
-                      Continuous Baseline vs. AI Power Stream (Watts)
-                    </h3>
-                    <div className="h-64 w-full">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={timeSeriesData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#ebebeb" />
-                          <XAxis
-                            dataKey="time"
-                            stroke="#ebebeb"
-                            tick={{ fontSize: 10, fill: "#8f8f8f" }}
-                            tickLine={false}
-                          />
-                          <YAxis stroke="#ebebeb" tick={{ fontSize: 10, fill: "#8f8f8f" }} tickLine={false} />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: "#ffffff",
-                              border: "1px solid #ebebeb",
-                              borderRadius: "12px",
-                              fontSize: "11px",
-                            }}
-                          />
-                          <Legend />
-                          <Area
-                            type="monotone"
-                            dataKey="baseline_w"
-                            stackId="1"
-                            stroke="#ee0000"
-                            fill="#ee0000"
-                            fillOpacity={0.12}
-                            name="Baseline 100% Power (W)"
-                          />
-                          <Area
-                            type="monotone"
-                            dataKey="optimized_w"
-                            stackId="2"
-                            stroke="#0070f3"
-                            fill="#0070f3"
-                            fillOpacity={0.12}
-                            name="AI Optimized Power (W)"
-                          />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-
-                  {/* Chart 2: Operating State Distribution Pie Chart */}
-                  <div className="flex flex-col items-center justify-center rounded-md border border-hairline bg-elevated p-5">
-                    <h3 className="mb-3 self-start text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
-                      Active Operating State Ratio
-                    </h3>
-                    <div className="h-56 w-full">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={stateDistribution}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={50}
-                            outerRadius={80}
-                            paddingAngle={5}
-                            dataKey="value"
-                          >
-                            {stateDistribution.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={entry.color} />
-                            ))}
-                          </Pie>
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: "#ffffff",
-                              border: "1px solid #ebebeb",
-                              borderRadius: "12px",
-                              fontSize: "11px",
-                            }}
-                          />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
+                <div className="pt-4 border-t border-hairline text-xs font-mono">
+                  SLA Capacity Protection:{" "}
+                  <span className="text-ink font-bold">
+                    ✅ 100% Guaranteed (20% Headroom)
+                  </span>
                 </div>
+              </div>
+            </div>
+          )}
 
-                {/* Chart 3: Sector Power Comparison Bar Chart */}
-                <div className="rounded-md border border-hairline bg-elevated p-5">
-                  <h3 className="mb-3 text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
-                    Power Consumption Across Top Sector Nodes
+          {/* ------------------------------------------------------------------ */}
+          {/* TAB 2: POWER & LOAD ANALYTICS HUB                                   */}
+          {/* ------------------------------------------------------------------ */}
+          {activeTab === "analytics" && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Chart 1: Continuous Baseline vs AI Power Stream */}
+                <div className="lg:col-span-2 bg-canvas-elevated border border-hairline rounded-md p-5">
+                  <h3 className="text-sm font-bold text-ink uppercase tracking-wider mb-3">
+                    Continuous Baseline vs. AI Power Stream (Watts)
                   </h3>
                   <div className="h-64 w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        data={towers.slice(0, 10).map((t) => ({
-                          id: `Tower #${t.tower_id}`,
-                          load: t.current_prb_load,
-                          power: t.optimized_power_w,
-                        }))}
-                      >
+                      <AreaChart data={timeSeriesData}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#ebebeb" />
                         <XAxis
-                          dataKey="id"
-                          stroke="#ebebeb"
-                          tick={{ fontSize: 10, fill: "#8f8f8f" }}
-                          tickLine={false}
+                          dataKey="time"
+                          stroke="#8f8f8f"
+                          tick={{ fontSize: 10 }}
                         />
-                        <YAxis stroke="#ebebeb" tick={{ fontSize: 10, fill: "#8f8f8f" }} tickLine={false} />
+                        <YAxis stroke="#8f8f8f" tick={{ fontSize: 10 }} />
                         <Tooltip
                           contentStyle={{
                             backgroundColor: "#ffffff",
-                            border: "1px solid #ebebeb",
-                            borderRadius: "12px",
-                            fontSize: "11px",
+                            borderColor: "#ebebeb",
                           }}
                         />
-                        <Bar
-                          dataKey="power"
-                          fill="#171717"
-                          radius={[4, 4, 0, 0]}
-                          name="Optimized Power (W)"
+                        <Legend />
+                        <Area
+                          type="monotone"
+                          dataKey="baseline_w"
+                          stackId="1"
+                          stroke="#ee0000"
+                          fill="#ee0000"
+                          fillOpacity={0.2}
+                          name="Baseline 100% Power (W)"
                         />
-                      </BarChart>
+                        <Area
+                          type="monotone"
+                          dataKey="optimized_w"
+                          stackId="2"
+                          stroke="#0070f3"
+                          fill="#0070f3"
+                          fillOpacity={0.4}
+                          name="AI Optimized Power (W)"
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                {/* Chart 2: Operating State Distribution Pie Chart */}
+                <div className="bg-canvas-elevated border border-hairline rounded-md p-5 flex flex-col items-center justify-center">
+                  <h3 className="text-sm font-bold text-ink uppercase tracking-wider mb-3 self-start">
+                    Active Operating State Ratio
+                  </h3>
+                  <div className="h-56 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={stateDistribution}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={50}
+                          outerRadius={80}
+                          paddingAngle={5}
+                          dataKey="value"
+                        >
+                          {stateDistribution.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "#ffffff",
+                            borderColor: "#ebebeb",
+                          }}
+                        />
+                        <Legend />
+                      </PieChart>
                     </ResponsiveContainer>
                   </div>
                 </div>
               </div>
-            )}
 
-            {/* ------------------------------------------------------------------ */}
-            {/* TAB 3: WHAT-IF STRESS SIMULATOR ENGINE                              */}
-            {/* ------------------------------------------------------------------ */}
-            {activeTab === "simulation" && (
-              <div className="grid min-h-[420px] grid-cols-1 gap-6 lg:grid-cols-3">
-                {/* Simulation Controls Sidebar */}
-                <div className="flex flex-col rounded-md border border-hairline bg-elevated p-5">
-                  <h2 className="mb-1 text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
+              {/* Chart 3: Sector Power Comparison Bar Chart */}
+              <div className="bg-canvas-elevated border border-hairline rounded-md p-5">
+                <h3 className="text-sm font-bold text-ink uppercase tracking-wider mb-3">
+                  Power Consumption Across Top Sector Nodes
+                </h3>
+                <div className="h-64 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={towers.slice(0, 10).map((t) => ({
+                        id: `Tower #${t.tower_id}`,
+                        load: t.current_prb_load,
+                        power: t.optimized_power_w,
+                      }))}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#ebebeb" />
+                      <XAxis
+                        dataKey="id"
+                        stroke="#8f8f8f"
+                        tick={{ fontSize: 10 }}
+                      />
+                      <YAxis stroke="#8f8f8f" tick={{ fontSize: 10 }} />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#ffffff",
+                          borderColor: "#ebebeb",
+                        }}
+                      />
+                      <Bar
+                        dataKey="power"
+                        fill="#0070f3"
+                        radius={[4, 4, 0, 0]}
+                        name="Optimized Power (W)"
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ------------------------------------------------------------------ */}
+          {/* TAB 3: WHAT-IF STRESS SIMULATOR ENGINE                              */}
+          {/* ------------------------------------------------------------------ */}
+          {activeTab === "simulation" && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Simulation Controls Sidebar */}
+              <div className="bg-canvas-elevated border border-hairline rounded-md p-5 space-y-6">
+                <div>
+                  <h2 className="text-sm font-bold text-ink uppercase tracking-wider mb-1">
                     What-If Control Parameters
                   </h2>
-                  <p className="mb-6 text-xs text-body">
+                  <p className="text-xs text-body">
                     Simulate stadium crowds, traffic surges, or custom safety
                     headroom settings live.
                   </p>
-
-                  <div className="flex flex-1 flex-col justify-center gap-6 text-xs font-mono">
-                    <div>
-                      <label className="mb-1 flex justify-between font-semibold text-ink">
-                        <span>Traffic Surge Scale:</span>
-                        <span className="text-link">{trafficMultiplier}x</span>
-                      </label>
-                      <input
-                        type="range"
-                        min="0.5"
-                        max="2.5"
-                        step="0.1"
-                        value={trafficMultiplier}
-                        onChange={(e) =>
-                          setTrafficMultiplier(parseFloat(e.target.value))
-                        }
-                        className="w-full accent-ink"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="mb-1 flex justify-between font-semibold text-ink">
-                        <span>QoS Headroom Buffer:</span>
-                        <span className="text-link">+{safetyHeadroom}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min="5"
-                        max="50"
-                        step="5"
-                        value={safetyHeadroom}
-                        onChange={(e) =>
-                          setSafetyHeadroom(parseInt(e.target.value))
-                        }
-                        className="w-full accent-ink"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="mb-1 flex justify-between font-semibold text-ink">
-                        <span>Base Power (P0):</span>
-                        <span className="text-link">{staticPowerP0} W</span>
-                      </label>
-                      <input
-                        type="range"
-                        min="150"
-                        max="400"
-                        step="10"
-                        value={staticPowerP0}
-                        onChange={(e) => setStaticPowerP0(parseInt(e.target.value))}
-                        className="w-full accent-ink"
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      setTrafficMultiplier(1.0);
-                      setSafetyHeadroom(20);
-                      setStaticPowerP0(250);
-                    }}
-                    className="mt-6 w-full rounded-md border border-hairline bg-elevated py-2 text-[12px] font-semibold text-ink transition-colors hover:bg-hairline-soft"
-                  >
-                    Reset Default Controls
-                  </button>
                 </div>
 
-                {/* Simulation Outcome Panel */}
-                <div className="flex flex-col justify-between rounded-md border border-hairline bg-elevated p-5 lg:col-span-2">
-                  <h2 className="mb-4 text-[15px] font-semibold tracking-[-0.2px] text-ink uppercase">
-                    Simulated Power &amp; SLA Outcome
+                <div className="space-y-4 text-xs font-mono">
+                  <div>
+                    <label className="flex justify-between text-ink font-semibold mb-1">
+                      <span>Traffic Surge Scale:</span>
+                      <span className="text-link">{trafficMultiplier}x</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2.5"
+                      step="0.1"
+                      value={trafficMultiplier}
+                      onChange={(e) =>
+                        setTrafficMultiplier(parseFloat(e.target.value))
+                      }
+                      className="w-full accent-ink"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="flex justify-between text-ink font-semibold mb-1">
+                      <span>QoS Headroom Buffer:</span>
+                      <span className="text-link">+{safetyHeadroom}%</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="5"
+                      max="50"
+                      step="5"
+                      value={safetyHeadroom}
+                      onChange={(e) =>
+                        setSafetyHeadroom(parseInt(e.target.value))
+                      }
+                      className="w-full accent-ink"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="flex justify-between text-ink font-semibold mb-1">
+                      <span>Base Power (P0):</span>
+                      <span className="text-link">{staticPowerP0} W</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="150"
+                      max="400"
+                      step="10"
+                      value={staticPowerP0}
+                      onChange={(e) => setStaticPowerP0(parseInt(e.target.value))}
+                      className="w-full accent-ink"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setTrafficMultiplier(1.0);
+                    setSafetyHeadroom(20);
+                    setStaticPowerP0(STATIC_POWER_P0);
+                  }}
+                  className="w-full py-2 bg-canvas border border-hairline text-ink hover:bg-hairline rounded-md text-xs font-semibold transition-all"
+                >
+                  Reset Default Controls
+                </button>
+              </div>
+
+              {/* Simulation Outcome Panel */}
+              <div className="lg:col-span-2 bg-canvas-elevated border border-hairline rounded-md p-5 flex flex-col justify-between">
+                <div>
+                  <h2 className="text-sm font-bold text-ink uppercase tracking-wider mb-4">
+                    Simulated Power & SLA Outcome
                   </h2>
 
                   {selectedTowerOpt && (
-                    <div className="flex flex-col gap-6">
+                    <div className="space-y-6">
                       <div className="grid grid-cols-3 gap-4 text-center">
-                        <div className="rounded-md border border-hairline bg-canvas p-4">
-                          <span className="block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                        <div className="bg-canvas p-4 rounded-md border border-hairline">
+                          <span className="text-mute text-[10px] uppercase block font-mono">
                             Simulated PRB Load
                           </span>
-                          <span className="mt-1 block text-[20px] font-semibold tracking-[-0.4px] text-ink">
+                          <span className="text-xl font-bold text-ink">
                             {(
                               selectedTowerOpt.predicted_prb * trafficMultiplier
                             ).toFixed(1)}
                             %
                           </span>
                         </div>
-                        <div className="rounded-md border border-hairline bg-canvas p-4">
-                          <span className="block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                        <div className="bg-canvas p-4 rounded-md border border-hairline">
+                          <span className="text-mute text-[10px] uppercase block font-mono">
                             Allocated Capacity
                           </span>
-                          <span className="mt-1 block text-[20px] font-semibold tracking-[-0.4px] text-link">
+                          <span className="text-xl font-bold text-link">
                             {(
                               selectedTowerOpt.predicted_prb *
                               trafficMultiplier *
@@ -1364,30 +1294,31 @@ export default function App() {
                             %
                           </span>
                         </div>
-                        <div className="rounded-md border border-hairline bg-canvas p-4">
-                          <span className="block font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-mute">
+                        <div className="bg-canvas p-4 rounded-md border border-hairline">
+                          <span className="text-mute text-[10px] uppercase block font-mono">
                             Estimated Savings
                           </span>
-                          <span className="mt-1 block text-[20px] font-semibold tracking-[-0.4px] text-ink">
+                          <span className="text-xl font-bold text-link">
                             {(
-                              418.4 - selectedTowerOpt.optimized_power_w
+                              selectedTowerOpt.baseline_power_w -
+                              selectedTowerOpt.optimized_power_w
                             ).toFixed(1)}{" "}
                             W
                           </span>
                         </div>
                       </div>
 
-                      <div className="rounded-md border border-hairline bg-canvas p-4">
-                        <h3 className="mb-2 text-[11px] font-semibold text-ink uppercase">
+                      <div className="bg-canvas p-4 rounded-md border border-hairline">
+                        <h3 className="text-xs font-bold text-ink uppercase mb-2">
                           Simulation State Evaluation
                         </h3>
-                        <p className="text-xs leading-relaxed text-body">
+                        <p className="text-xs text-body leading-relaxed">
                           Under a{" "}
-                          <strong className="font-semibold text-ink">
+                          <strong className="text-ink">
                             {trafficMultiplier}x traffic surge
                           </strong>{" "}
                           with a{" "}
-                          <strong className="font-semibold text-ink">
+                          <strong className="text-ink">
                             +{safetyHeadroom}% headroom buffer
                           </strong>
                           , base station static power scales dynamically to
@@ -1398,97 +1329,101 @@ export default function App() {
                   )}
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* ------------------------------------------------------------------ */}
-            {/* TAB 4: 3GPP HARDWARE TUNING                                         */}
-            {/* ------------------------------------------------------------------ */}
-            {activeTab === "hardware" && (
-              <div className="rounded-md border border-hairline bg-elevated p-6">
-                <h2 className="mb-1 text-[20px] font-semibold tracking-[-0.4px] text-ink">
+          {/* ------------------------------------------------------------------ */}
+          {/* TAB 4: 3GPP HARDWARE TUNING                                         */}
+          {/* ------------------------------------------------------------------ */}
+          {activeTab === "hardware" && (
+            <div className="bg-canvas-elevated border border-hairline rounded-md p-6 space-y-6">
+              <div>
+                <h2 className="text-base font-bold text-ink mb-1">
                   3GPP Release 18 EARTH Base Station Hardware Specifications
                 </h2>
-                <p className="mb-6 font-mono text-[12px] text-body">
+                <p className="text-xs text-body font-mono">
                   Non-linear power equations applied across active sector
                   transceivers.
                 </p>
+              </div>
 
-                <div className="grid grid-cols-1 gap-6 font-mono text-xs md:grid-cols-3">
-                  <div className="rounded-md border border-hairline bg-canvas p-4">
-                    <h3 className="mb-2 font-bold text-ink">Macro Cell (3GPP)</h3>
-                    <p className="text-body">P0 (Static Idle): 250.0 W</p>
-                    <p className="text-body">Delta_p (Slope): 4.2</p>
-                    <p className="text-body">Pmax (RF Output): 40.0 W</p>
-                    <p className="mt-2 font-bold text-ink">Max Power: 418.4 W</p>
-                  </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 font-mono text-xs">
+                <div className="bg-canvas p-4 rounded-md border border-hairline">
+                  <h3 className="font-bold text-ink mb-2">Macro Cell (3GPP)</h3>
+                  <p className="text-body">P0 (Static Idle): {STATIC_POWER_P0} W</p>
+                  <p className="text-body">Delta_p (Slope): {DELTA_P}</p>
+                  <p className="text-body">Pmax (RF Output): {PMAX} W</p>
+                  <p className="text-ink mt-2 font-bold">
+                    Max Power: {STATIC_POWER_P0 + DELTA_P * PMAX} W
+                  </p>
+                </div>
 
-                  <div className="rounded-md border border-hairline bg-canvas p-4">
-                    <h3 className="mb-2 font-bold text-ink">Micro-Sleep (ASM) Mode</h3>
-                    <p className="text-body">Symbol gap amplifier gating</p>
-                    <p className="text-body">Disables PA during zero traffic</p>
-                    <p className="text-body">Transition Latency: 35 µs</p>
-                    <p className="mt-2 font-bold text-ink">Power Reduction: ~40%</p>
-                  </div>
+                <div className="bg-canvas p-4 rounded-md border border-hairline">
+                  <h3 className="font-bold text-violet mb-2">Micro-Sleep (ASM) Mode</h3>
+                  <p className="text-body">Symbol gap amplifier gating</p>
+                  <p className="text-body">Disables PA during zero traffic</p>
+                  <p className="text-body">Transition Latency: 35 µs</p>
+                  <p className="text-ink mt-2 font-bold">Power Reduction: ~40%</p>
+                </div>
 
-                  <div className="rounded-md border border-hairline bg-canvas p-4">
-                    <h3 className="mb-2 font-bold text-ink">Deep Sleep Mode</h3>
-                    <p className="text-body">Deactivates secondary carriers</p>
-                    <p className="text-body">BBU static power reduction</p>
-                    <p className="text-body">Transition Latency: 15 ms</p>
-                    <p className="mt-2 font-bold text-ink">Power Reduction: ~80%</p>
-                  </div>
+                <div className="bg-canvas p-4 rounded-md border border-hairline">
+                  <h3 className="font-bold text-cyan mb-2">Deep Sleep Mode</h3>
+                  <p className="text-body">Deactivates secondary carriers</p>
+                  <p className="text-body">BBU static power reduction</p>
+                  <p className="text-body">Transition Latency: 15 ms</p>
+                  <p className="text-ink mt-2 font-bold">Power Reduction: ~80%</p>
                 </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* ------------------------------------------------------------------ */}
-            {/* TAB 5: SYSTEM AUDIT TRAIL LOGS                                     */}
-            {/* ------------------------------------------------------------------ */}
-            {activeTab === "logs" && (
-              <div className="rounded-md border border-hairline bg-elevated p-6">
-                <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-[20px] font-semibold tracking-[-0.4px] text-ink">
-                    System Operations &amp; Audit Trail Log
-                  </h2>
-                  <span className="font-mono text-[12px] text-mute">
-                    {systemLogs.length} Events Captured
-                  </span>
-                </div>
+          {/* ------------------------------------------------------------------ */}
+          {/* TAB 5: SYSTEM AUDIT TRAIL LOGS                                     */}
+          {/* ------------------------------------------------------------------ */}
+          {activeTab === "logs" && (
+            <div className="bg-canvas-elevated border border-hairline rounded-md p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-base font-bold text-ink">
+                  System Operations & Audit Trail Log
+                </h2>
+                <span className="text-xs font-mono text-mute">
+                  {systemLogs.length} Events Captured
+                </span>
+              </div>
 
-                <div className="max-h-[500px] space-y-2 overflow-y-auto pr-2 font-mono text-xs">
-                  {systemLogs.map((log) => (
-                    <div
-                      key={log.id}
-                      className="flex items-center justify-between rounded-md border border-hairline bg-canvas p-3"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="text-mute">{log.timestamp}</span>
-                        <span
-                          className={`rounded-sm px-2 py-0.5 text-[10px] font-bold ${
-                            log.level === "ACTION"
-                              ? "bg-link/10 text-link"
-                              : log.level === "WARN"
-                                ? "bg-amber-500/10 text-amber-600"
-                                : log.level === "CRITICAL"
-                                  ? "bg-red-500/10 text-red-600"
-                                  : "bg-canvas border border-hairline text-body"
-                          }`}
-                        >
-                          {log.level}
-                        </span>
-                        <span className="text-body">{log.message}</span>
-                      </div>
-                      {log.tower_id > 0 && (
-                        <span className="font-bold text-ink">
-                          Sector #{log.tower_id}
-                        </span>
-                      )}
+              <div className="space-y-2 font-mono text-xs max-h-[500px] overflow-y-auto pr-2">
+                {systemLogs.map((log) => (
+                  <div
+                    key={log.id}
+                    className="bg-canvas p-3 rounded-md border border-hairline flex items-center justify-between"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-mute">{log.timestamp}</span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          log.level === "ACTION"
+                            ? "bg-link-soft text-link-deep"
+                            : log.level === "WARN"
+                              ? "bg-warning-soft text-warning-deep"
+                              : log.level === "CRITICAL"
+                                ? "bg-error/10 text-error-deep"
+                                : "bg-canvas border border-hairline text-body"
+                        }`}
+                      >
+                        {log.level}
+                      </span>
+                      <span className="text-ink">{log.message}</span>
                     </div>
-                  ))}
-                </div>
+                    {log.tower_id > 0 && (
+                      <span className="text-mute font-bold">
+                        Sector #{log.tower_id}
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
